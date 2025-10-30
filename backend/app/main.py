@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, Column, String, Integer, BigInteger, DateT
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, mapped_column, Mapped
 
 # ---------- Config ----------
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dev.db")
 PULL_INTERVAL_SECONDS = int(os.getenv("PULL_INTERVAL_SECONDS", "15"))
 
@@ -53,7 +53,7 @@ app = FastAPI(title="Kalshi Pipeline API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN] if FRONTEND_ORIGIN != "*" else ["*"],
+    allow_origins=[ALLOWED_ORIGINS] if ALLOWED_ORIGINS != "*" else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

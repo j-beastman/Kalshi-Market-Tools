@@ -16,7 +16,7 @@
     const {useState, useEffect} = React;
     const { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } = window.Recharts;
 
-    const API_BASE = window.API_BASE || "REPLACE_WITH_RAILWAY_URL"; // e.g., https://my-app.up.railway.app
+    const API_BASE = "https://kalshi-market-tools-production.up.railway.app" // e.g., https://my-app.up.railway.app
 
     function Chart({ticker}) {
       const [series, setSeries] = useState([]);
