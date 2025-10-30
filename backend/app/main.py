@@ -8,9 +8,9 @@ from datetime import datetime
 import os
 
 # Import your modules
-from .kalshi_client import KalshiClient
-from .market_analyzer import MarketAnalyzer
-from .database import Database
+from kalshi_client import KalshiClient
+from market_analyzer import MarketAnalyzer
+from database import Database
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,16 +45,21 @@ async def startup_event():
     global kalshi_client, market_analyzer, db
     
     try:
-        # Initialize database
-        db = Database(os.getenv("DATABASE_PATH", "kalshi_data.db"))
-        await db.initialize()
+        # Initialize database with PostgreSQL URL
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            logger.warning("DATABASE_URL not configured - running without database")
+            db = None
+        else:
+            db = Database(database_url)
+            await db.initialize()
         
         # Initialize Kalshi client
         api_key = os.getenv("KALSHI_API_KEY")
-        private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+        private_key = os.getenv("KALSHI_PRIVATE_KEY")
         
-        if api_key and private_key_path and os.path.exists(private_key_path):
-            kalshi_client = KalshiClient(api_key, private_key_path)
+        if api_key and private_key:
+            kalshi_client = KalshiClient(api_key, private_key)
             logger.info("Kalshi client initialized")
         else:
             logger.warning("Kalshi credentials not found, running in mock mode")
