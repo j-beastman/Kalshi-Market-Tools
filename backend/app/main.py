@@ -51,13 +51,13 @@ def init_db():
 # ---------- App ----------
 app = FastAPI(title="Kalshi Pipeline API", version="0.1.0")
 
-origins = [o.strip() for o in os.getenv("FRONTEND_ORIGINS", "*").split(",") if o.strip()]
-allow_all = "*" in origins or not origins
+# origins = [o.strip() for o in os.getenv("FRONTEND_ORIGINS", "*").split(",") if o.strip()]
+# allow_all = "*" in origins or not origins
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if allow_all else origins,
-    allow_credentials=False,      # SSE doesn’t need credentials; keeps CORS simple
+    allow_origins=["*"],         # TEMP: allow all to verify
+    allow_credentials=False,     # keep False for SSE simplicity
     allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
 )
