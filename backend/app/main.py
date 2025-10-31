@@ -71,24 +71,51 @@ async def fetch_and_store_markets():
         # Get open markets
         markets = await kalshi_client.get_markets(status="open", limit=50)
         
+        # Filter out complex multi-game markets that might not have standard orderbooks
+        filtered_markets = [
+            m for m in markets 
+            if not m.get("ticker", "").startswith("KXMVENFLMULTIGAME")
+        ]
+        
+        print(f"📊 Processing {len(filtered_markets)} markets (filtered from {len(markets)})")
+        
         # Process each market
         market_updates = []
-        for market in markets:
+        for market in filtered_markets:
             ticker = market.get("ticker")
             
-            # Get orderbook for pricing
             try:
+                # Get orderbook for pricing
                 orderbook = await kalshi_client.get_orderbook(ticker, depth=5)
                 
-                # Extract best bid/ask
-                yes_bid = orderbook["yes"][0]["price"] if orderbook.get("yes") else 0
-                yes_ask = orderbook["yes"][-1]["price"] if orderbook.get("yes") else 100
-                no_bid = orderbook["no"][0]["price"] if orderbook.get("no") else 0
-                no_ask = orderbook["no"][-1]["price"] if orderbook.get("no") else 100
+                # Calculate prices based on orderbook
+                yes_price = 50  # Default
+                no_price = 50
+                yes_bid = 0
+                yes_ask = 100
+                no_bid = 0
+                no_ask = 100
                 
-                # Calculate mid prices
-                yes_price = (yes_bid + yes_ask) / 2
-                no_price = (no_bid + no_ask) / 2
+                # Extract best bid/ask from yes side
+                if orderbook.get("yes") and len(orderbook["yes"]) > 0:
+                    yes_levels = sorted(orderbook["yes"], key=lambda x: x.get("price", 0))
+                    if yes_levels:
+                        yes_bid = yes_levels[0].get("price", 0)
+                        yes_ask = yes_levels[-1].get("price", 100)
+                        yes_price = (yes_bid + yes_ask) / 2
+                
+                # Extract best bid/ask from no side
+                if orderbook.get("no") and len(orderbook["no"]) > 0:
+                    no_levels = sorted(orderbook["no"], key=lambda x: x.get("price", 0))
+                    if no_levels:
+                        no_bid = no_levels[0].get("price", 0)
+                        no_ask = no_levels[-1].get("price", 100)
+                        no_price = (no_bid + no_ask) / 2
+                
+                # If we don't have orderbook data, try to use market's last price
+                if yes_price == 50 and no_price == 50:
+                    yes_price = market.get("yes_price", market.get("last_price", 50))
+                    no_price = market.get("no_price", 100 - yes_price)
                 
                 # Update market data
                 market.update({
@@ -103,10 +130,13 @@ async def fetch_and_store_markets():
                 # Cache in database
                 await db.cache_market(market)
                 
-                # Get recent trades
-                trades = await kalshi_client.get_trades(ticker, limit=20)
-                for trade in trades:
-                    await db.cache_trade(ticker, trade)
+                # Get recent trades (with error handling)
+                try:
+                    trades = await kalshi_client.get_trades(ticker, limit=20)
+                    for trade in trades:
+                        await db.cache_trade(ticker, trade)
+                except Exception as e:
+                    print(f"Could not fetch trades for {ticker}: {e}")
                 
                 # Prepare update for SSE
                 market_updates.append({
@@ -118,9 +148,19 @@ async def fetch_and_store_markets():
                     "volume_24h": market.get("volume", 0)
                 })
                 
+                print(f"✅ Processed {ticker}: YES={round(yes_price)}¢ NO={round(no_price)}¢")
+                
             except Exception as e:
-                print(f"Error processing {ticker}: {e}")
-                continue
+                print(f"⚠️ Error processing {ticker}: {e}")
+                # Still add the market with basic info
+                market_updates.append({
+                    "ticker": ticker,
+                    "title": market.get("title"),
+                    "category": market.get("category"),
+                    "yes_price": market.get("yes_price", 50),
+                    "no_price": market.get("no_price", 50),
+                    "volume_24h": market.get("volume", 0)
+                })
         
         # Broadcast updates
         if market_updates:
@@ -134,7 +174,8 @@ async def fetch_and_store_markets():
         
     except Exception as e:
         print(f"❌ Error fetching markets: {e}")
-        # Fall back to cached data
+        import traceback
+        traceback.print_exc()
         return await fetch_mock_data()
 
 async def fetch_mock_data():
@@ -262,3 +303,37 @@ async def shutdown():
         await db.close()
     if kalshi_client:
         kalshi_client.close()
+
+# --------- Testing ----------
+@app.get("/debug/kalshi-test")
+async def debug_kalshi():
+    """Test Kalshi API directly"""
+    if not kalshi_client:
+        return {"error": "No Kalshi client configured"}
+    
+    try:
+        # Get first few markets
+        markets = await kalshi_client.get_markets(status="open", limit=5)
+        
+        if not markets:
+            return {"error": "No markets returned"}
+        
+        # Test orderbook for first market
+        ticker = markets[0].get("ticker")
+        
+        # Get raw response
+        response = await kalshi_client._request("GET", f"/markets/{ticker}/orderbook", params={"depth": 5})
+        
+        return {
+            "ticker": ticker,
+            "raw_orderbook_response": response,
+            "market_count": len(markets),
+            "sample_market": markets[0]
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }

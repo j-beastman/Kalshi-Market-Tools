@@ -142,33 +142,53 @@ class KalshiClient:
             params = {"depth": depth}
             response = await self._request("GET", f"/markets/{ticker}/orderbook", params=params)
             
-            orderbook = response.get("orderbook", {})
-            
-            # Format orderbook
+            # Initialize formatted response
             formatted = {
                 "yes": [],
                 "no": []
             }
             
-            # Parse yes side
-            for level in orderbook.get("yes", []):
-                formatted["yes"].append({
-                    "price": level.get("price", 0),
-                    "size": level.get("size", 0)
-                })
+            # Handle different response structures
+            if response is None:
+                logger.warning(f"Null orderbook response for {ticker}")
+                return formatted
+            
+            # Check if response is the orderbook directly or wrapped
+            orderbook = response
+            if isinstance(response, dict) and "orderbook" in response:
+                orderbook = response["orderbook"]
+            
+            # Handle case where orderbook might be None or not a dict
+            if not isinstance(orderbook, dict):
+                logger.warning(f"Unexpected orderbook format for {ticker}: {type(orderbook)}")
+                return formatted
+            
+            # Parse yes side - handle both list and dict structures
+            yes_data = orderbook.get("yes", [])
+            if isinstance(yes_data, list):
+                for level in yes_data:
+                    if isinstance(level, dict):
+                        formatted["yes"].append({
+                            "price": level.get("price", 0),
+                            "size": level.get("size", 0)
+                        })
             
             # Parse no side
-            for level in orderbook.get("no", []):
-                formatted["no"].append({
-                    "price": level.get("price", 0),
-                    "size": level.get("size", 0)
-                })
+            no_data = orderbook.get("no", [])
+            if isinstance(no_data, list):
+                for level in no_data:
+                    if isinstance(level, dict):
+                        formatted["no"].append({
+                            "price": level.get("price", 0),
+                            "size": level.get("size", 0)
+                        })
             
             return formatted
             
         except Exception as e:
             logger.error(f"Error fetching orderbook for {ticker}: {e}")
-            raise
+            # Return empty orderbook on error
+            return {"yes": [], "no": []}
     
     async def get_trades(self, ticker: str, limit: int = 100) -> List[Dict]:
         """
