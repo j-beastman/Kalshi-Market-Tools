@@ -1,978 +1,143 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kalshi Market Tools</title>
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Load dependencies in correct order -->
-    <script crossorigin src="https://unpkg.com/react@17/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
-    <script crossorigin src="https://unpkg.com/recharts@2.1.9/umd/Recharts.js"></script>
-    <!-- Babel for JSX -->
-    <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-        .tab-active { border-bottom: 2px solid #3b82f6; color: #3b82f6; }
-        .market-card:hover { box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .skeleton { background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 1000px 100%; animation: loading 2s infinite; }
-        @keyframes loading { 0% { background-position: -1000px 0; } 100% { background-position: 1000px 0; } }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Kalshi Market Tools (Live)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@17/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/recharts@2.10.3/umd/Recharts.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
 </head>
-<body>
-<div id="root">Loading...</div>
+<body class="bg-slate-950 text-white">
+  <div id="root" class="p-6 max-w-6xl mx-auto"></div>
+  <script type="text/babel">
+    const {useState, useEffect} = React;
+    const RechartsLib = window.Recharts || {};
+    const { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } = RechartsLib;
 
-<script type="text/babel">
-// Log to help debug
-console.log('Starting Kalshi Market Tools...');
+    const API_BASE = window.API_BASE || "REPLACE_WITH_RAILWAY_URL"; // e.g., https://my-app.up.railway.app
 
-const { useState, useEffect, useMemo } = React;
-
-// Check if Recharts loaded
-if (window.Recharts) {
-    console.log('Recharts loaded successfully!');
-    var { LineChart, Line, BarChart, Bar, ComposedChart, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } = window.Recharts;
-} else {
-    console.warn('Recharts not loaded - charts will be disabled');
+    function LibWarning(){
+  return (
+    <div className="bg-amber-900/40 border border-amber-700 rounded-xl p-3 text-sm mb-3">
+      Recharts failed to load from the CDN. Charts are disabled, but the rest of the app should work.
+    </div>
+  );
 }
-
-// Simple fallback chart component if Recharts doesn't load
-const SimpleChart = ({ data, title }) => {
-    if (!data || data.length === 0) return null;
-    
-    const maxValue = Math.max(...data.map(d => d.value || 0));
-    
-    return (
-        <div className="bg-white rounded-lg shadow p-4">
-            <h4 className="text-sm font-semibold mb-3">{title}</h4>
-            <div className="space-y-2">
-                {data.slice(0, 10).map((item, i) => (
-                    <div key={i} className="flex items-center">
-                        <span className="text-xs w-16">{item.label}</span>
-                        <div className="flex-1 mx-2">
-                            <div 
-                                className="h-4 bg-blue-500 rounded"
-                                style={{ width: `${(item.value / maxValue) * 100}%` }}
-                            ></div>
-                        </div>
-                        <span className="text-xs">{item.value}</span>
-                    </div>
-                ))}
-            </div>
+function Chart({ticker}) {
+      const [series, setSeries] = useState([]);
+      useEffect(() => {
+        if (!ticker) return;
+        fetch(`${API_BASE}/markets/${ticker}`).then(r=>r.json()).then(d=>{
+          setSeries(d.series || []);
+        });
+      }, [ticker]);
+      return (
+        <div className="bg-slate-900 rounded-2xl p-4 shadow">
+          <div className="font-semibold mb-3">Price over time — {ticker}</div>
+          {!LineChart ? <LibWarning/> : null}
+          <div style={{width:"100%", height:300}}>
+            {LineChart ? <ResponsiveContainer>
+              <LineChart data={series}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="ts" tickFormatter={(t)=>new Date(t).toLocaleTimeString()} minTickGap={48}/>
+                <YAxis/>
+                <Tooltip />
+                <Line type="monotone" dataKey="yes" dot={false} />
+                <Line type="monotone" dataKey="no" dot={false} />
+              </LineChart>
+            </ResponsiveContainer> : null}
+          </div>
         </div>
-    );
-};
+      );
+    }
 
-// ==================== MOCK DATA ====================
-const MockData = {
-    markets: [
-        { ticker: 'POTUS-24', title: 'Will the incumbent win the 2024 Presidential Election?', category: 'Politics', volume: 5432, yes_price: 52, no_price: 48, yes_bid: 51, yes_ask: 53, no_bid: 47, no_ask: 49, volatility: 7.2 },
-        { ticker: 'FED-MAR', title: 'Will the Fed raise rates in March?', category: 'Economics', volume: 3211, yes_price: 65, no_price: 35, yes_bid: 64, yes_ask: 66, no_bid: 34, no_ask: 36, volatility: 5.8 },
-        { ticker: 'NFL-SB', title: 'Will the Chiefs win the Super Bowl?', category: 'Sports', volume: 8765, yes_price: 35, no_price: 65, yes_bid: 34, yes_ask: 36, no_bid: 64, no_ask: 66, volatility: 8.9 },
-        { ticker: 'HURR-5', title: 'Will there be a Category 5 hurricane this season?', category: 'Weather', volume: 2109, yes_price: 23, no_price: 77, yes_bid: 22, yes_ask: 24, no_bid: 76, no_ask: 78, volatility: 4.3 },
-        { ticker: 'TSLA-500', title: 'Will Tesla stock reach $500 by year end?', category: 'Technology', volume: 6543, yes_price: 41, no_price: 59, yes_bid: 40, yes_ask: 42, no_bid: 58, no_ask: 60, volatility: 6.7 },
-        { ticker: 'CPI-3', title: 'Will inflation exceed 3% this quarter?', category: 'Economics', volume: 4321, yes_price: 58, no_price: 42, yes_bid: 57, yes_ask: 59, no_bid: 41, no_ask: 43, volatility: 5.2 },
-        { ticker: 'CONG-BILL', title: 'Will Congress pass the infrastructure bill?', category: 'Politics', volume: 3456, yes_price: 71, no_price: 29, yes_bid: 70, yes_ask: 72, no_bid: 28, no_ask: 30, volatility: 6.8 },
-        { ticker: 'BTC-100K', title: 'Will Bitcoin reach $100,000 this year?', category: 'Technology', volume: 9876, yes_price: 31, no_price: 69, yes_bid: 30, yes_ask: 32, no_bid: 68, no_ask: 70, volatility: 9.1 }
-    ],
-    
-    generateImpact: (quantity, side, market) => {
-        // Generate orderbook levels
-        const basePrice = side === 'yes' ? market.yes_ask : market.no_ask;
-        const levels = [];
-        let remainingQty = quantity;
-        let totalCost = 0;
-        let totalFilled = 0;
-        
-        // Create 5 orderbook levels with increasing prices
-        for (let i = 0; i < 5; i++) {
-            const levelPrice = basePrice + (i * 0.5);
-            const levelQty = i === 0 ? 200 : 300; // First level has 200, rest have 300
-            const filled = Math.min(remainingQty, levelQty);
-            const remaining = levelQty - filled;
-            
-            if (filled > 0) {
-                levels.push({
-                    price: levelPrice,
-                    filled: filled,
-                    remaining: remaining
-                });
-                
-                totalCost += filled * levelPrice;
-                totalFilled += filled;
-                remainingQty -= filled;
+    function App(){
+      const [markets, setMarkets] = useState([]);
+      const [selected, setSelected] = useState(null);
+      const [status, setStatus] = useState("connecting");
+
+      // initial load
+      useEffect(()=>{
+        fetch(`${API_BASE}/markets`).then(r=>r.json()).then(d=>{
+          setMarkets(d);
+          setSelected(d[0]?.ticker || null);
+        });
+      }, []);
+
+      // live updates via SSE
+      useEffect(()=>{
+        const es = new EventSource(`${API_BASE}/stream`);
+        es.onopen = () => setStatus("live");
+        es.onmessage = (ev) => {
+          try {
+            const payload = JSON.parse(ev.data);
+            if (payload.type === "upsert") {
+              // merge updates by ticker
+              setMarkets(prev => {
+                const byT = Object.fromEntries(prev.map(m => [m.ticker, m]));
+                for (const u of payload.markets) {
+                  byT[u.ticker] = {...(byT[u.ticker]||{}), ...u};
+                }
+                return Object.values(byT).sort((a,b)=>a.ticker.localeCompare(b.ticker));
+              });
             }
-            
-            if (remainingQty <= 0) break;
-        }
-        
-        const avgPrice = totalFilled > 0 ? totalCost / totalFilled : basePrice;
-        const slippage = basePrice > 0 ? ((avgPrice - basePrice) / basePrice * 100) : 0;
-        const fillRate = (totalFilled / quantity) * 100;
-        
-        return {
-            avg_price: avgPrice,
-            total_cost: totalCost / 100, // Convert cents to dollars
-            slippage: slippage,
-            fill_rate: fillRate,
-            levels_consumed: levels
+          } catch {}
         };
-    },
-    
-    generateVelocity: (market) => ({
-        metrics: {
-            total_volume: market.volume * 24,
-            recent_avg: Math.floor(market.volume * 1.3),
-            earlier_avg: Math.floor(market.volume * 0.9),
-            velocity_change: 44.4
-        },
-        peak: {
-            hour: '14:00',
-            volume: market.volume * 2.5,
-            coincided_with_news: Math.random() > 0.5
-        },
-        news_events: Math.random() > 0.5 ? [
-            {
-                timestamp: new Date().toISOString(),
-                description: 'Fed announces surprise rate decision',
-                volume_spike: market.volume * 2,
-                price_at_event: market.yes_price
-            }
-        ] : []
-    })
-};
+        es.onerror = () => setStatus("disconnected");
+        return () => es.close();
+      }, []);
 
-// ==================== COMPONENTS ====================
+      return (
+        <div className="space-y-6">
+          <header className="flex items-center justify-between">
+            <h1 className="text-2xl font-bold">Kalshi Market Tools</h1>
+            <span className={"px-3 py-1 rounded-full text-sm " + (status==="live"?"bg-green-600":"bg-yellow-600")}>
+              {status==="live"?"Live data":"Connecting…"}
+            </span>
+          </header>
 
-// Market Card Component
-function MarketCard({ market, isSelected, onClick }) {
-    const getVolatilityColor = (vol) => {
-        if (vol > 8) return 'bg-red-100 text-red-600';
-        if (vol > 6) return 'bg-yellow-100 text-yellow-600';
-        return 'bg-green-100 text-green-600';
-    };
-
-    return (
-        <div 
-            onClick={onClick}
-            className={`market-card p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                isSelected ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
-            }`}
-        >
-            <div className="flex justify-between items-start mb-2">
-                <span className="font-mono text-sm text-gray-500">{market.ticker}</span>
-                <span className={`text-xs px-2 py-1 rounded-full ${getVolatilityColor(market.volatility)}`}>
-                    σ{market.volatility}
-                </span>
+          <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-slate-900 rounded-2xl p-4 shadow">
+              <div className="font-semibold mb-3">Markets</div>
+              <div className="space-y-2">
+                {markets.map(m => (
+                  <button
+                    key={m.ticker}
+                    onClick={()=>setSelected(m.ticker)}
+                    className={"w-full text-left p-3 rounded-xl border transition " + (selected===m.ticker ? "bg-slate-800 border-slate-700" : "bg-slate-900 border-slate-800 hover:bg-slate-800")}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="font-medium">{m.title || m.ticker}</div>
+                        <div className="text-xs text-slate-400">{m.ticker}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-lg font-bold">{m.yes_price ?? 0}</div>
+                        <div className="text-xs text-slate-400">YES • {m.volume_24h ?? 0} vol</div>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+                {markets.length===0 && <div className="text-slate-400">Loading…</div>}
+              </div>
             </div>
-            <h4 className="font-medium text-sm mb-2">{market.title}</h4>
-            <div className="flex justify-between items-center text-xs text-gray-500">
-                <span>{market.volume.toLocaleString()} vol</span>
-                <span className="bg-gray-100 px-2 py-1 rounded">{market.category}</span>
+
+            <div>
+              {selected ? <Chart ticker={selected}/> : <div className="bg-slate-900 rounded-2xl p-4 shadow">Select a market</div>}
             </div>
+          </section>
+
+          <footer className="text-center text-slate-400 text-sm pt-4 border-t border-slate-800">
+            © 2025 • Demo — replace the simulated puller with real Kalshi fetches on the backend.
+          </footer>
         </div>
-    );
-}
-
-// Market Header Component
-function MarketHeader({ market }) {
-    if (!market) return null;
-    
-    return (
-        <div className="bg-white rounded-lg shadow p-6 mb-6">
-            <div className="mb-4">
-                <p className="text-sm text-gray-500 font-mono">{market.ticker}</p>
-                <h2 className="text-2xl font-bold">{market.title}</h2>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div>
-                    <p className="text-xs text-gray-500">YES Price</p>
-                    <p className="text-2xl font-bold text-green-600">{market.yes_price}¢</p>
-                    <p className="text-xs text-gray-400">B: {market.yes_bid}¢ / A: {market.yes_ask}¢</p>
-                </div>
-                <div>
-                    <p className="text-xs text-gray-500">NO Price</p>
-                    <p className="text-2xl font-bold text-red-600">{market.no_price}¢</p>
-                    <p className="text-xs text-gray-400">B: {market.no_bid}¢ / A: {market.no_ask}¢</p>
-                </div>
-                <div>
-                    <p className="text-xs text-gray-500">Volume</p>
-                    <p className="text-xl font-semibold">{market.volume.toLocaleString()}</p>
-                </div>
-                <div>
-                    <p className="text-xs text-gray-500">Spread</p>
-                    <p className="text-xl font-semibold">
-                        {((market.yes_ask - market.yes_bid) / market.yes_price * 100).toFixed(1)}%
-                    </p>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-// Impact Calculator Component
-function ImpactCalculator({ market }) {
-    const [side, setSide] = useState('yes');
-    const [quantity, setQuantity] = useState(100);
-    const [impact, setImpact] = useState(null);
-    
-    useEffect(() => {
-        if (market) {
-            const data = MockData.generateImpact(quantity, side, market);
-            setImpact(data);
-        }
-    }, [market, quantity, side]);
-    
-    // Generate chart data
-    const chartData = useMemo(() => {
-        if (!market) return [];
-        const data = [];
-        for (let q = 10; q <= 2000; q += 100) {
-            const imp = MockData.generateImpact(q, side, market);
-            data.push({
-                quantity: q,
-                marketPrice: side === 'yes' ? market.yes_price : market.no_price,
-                executionPrice: imp.avg_price,
-                slippage: imp.slippage
-            });
-        }
-        return data;
-    }, [market, side]);
-    
-    if (!market) {
-        return (
-            <div className="text-center py-12 text-gray-500">
-                <p className="text-xl">Select a market to calculate order impact</p>
-            </div>
-        );
+      );
     }
-    
-    return (
-        <div>
-            <MarketHeader market={market} />
-            
-            <div className="bg-white rounded-lg shadow p-6 mb-6">
-                <h3 className="text-lg font-semibold mb-4">Order Configuration</h3>
-                <div className="space-y-4">
-                    <div>
-                        <label className="text-sm font-medium text-gray-700">Side</label>
-                        <div className="flex gap-2 mt-1">
-                            <button
-                                onClick={() => setSide('yes')}
-                                className={`flex-1 py-2 rounded-lg font-medium transition ${
-                                    side === 'yes' ? 'bg-green-500 text-white' : 'bg-gray-100'
-                                }`}
-                            >
-                                YES
-                            </button>
-                            <button
-                                onClick={() => setSide('no')}
-                                className={`flex-1 py-2 rounded-lg font-medium transition ${
-                                    side === 'no' ? 'bg-red-500 text-white' : 'bg-gray-100'
-                                }`}
-                            >
-                                NO
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <div>
-                        <label className="text-sm font-medium text-gray-700">
-                            Order Size: {quantity} contracts
-                        </label>
-                        <input
-                            type="range"
-                            min="10"
-                            max="2000"
-                            step="10"
-                            value={quantity}
-                            onChange={(e) => setQuantity(parseInt(e.target.value))}
-                            className="w-full mt-2"
-                        />
-                    </div>
-                </div>
-            </div>
-            
-            {impact && (
-                <>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                        <div className="bg-blue-50 p-4 rounded-lg">
-                            <p className="text-sm text-gray-600">Avg Price</p>
-                            <p className="text-2xl font-bold text-blue-600">{impact.avg_price.toFixed(1)}¢</p>
-                        </div>
-                        <div className="bg-purple-50 p-4 rounded-lg">
-                            <p className="text-sm text-gray-600">Total Cost</p>
-                            <p className="text-2xl font-bold text-purple-600">${impact.total_cost.toFixed(2)}</p>
-                        </div>
-                        <div className="bg-orange-50 p-4 rounded-lg">
-                            <p className="text-sm text-gray-600">Slippage</p>
-                            <p className="text-2xl font-bold text-orange-600">{impact.slippage.toFixed(1)}%</p>
-                        </div>
-                        <div className="bg-green-50 p-4 rounded-lg">
-                            <p className="text-sm text-gray-600">Fill Rate</p>
-                            <p className="text-2xl font-bold text-green-600">{impact.fill_rate.toFixed(0)}%</p>
-                        </div>
-                    </div>
-                    
-                    {(() => {
-                        // Calculate actual filled vs unfilled from levels_consumed
-                        const totalFilled = impact.levels_consumed.reduce((sum, level) => sum + level.filled, 0);
-                        const totalUnfilled = quantity - totalFilled;
-                        const actualFillRate = (totalFilled / quantity) * 100;
-                        
-                        return totalUnfilled > 0 && (
-                            <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 rounded mb-6">
-                                <div className="flex items-start gap-3">
-                                    <span className="text-2xl">⚠️</span>
-                                    <div>
-                                        <p className="font-semibold text-yellow-800 mb-1">Insufficient Liquidity</p>
-                                        <p className="text-yellow-800">
-                                            Only <span className="font-bold">{totalFilled} of {quantity}</span> contracts ({actualFillRate.toFixed(1)}%) can be filled at current orderbook depth.
-                                            <span className="font-bold"> {totalUnfilled} contracts</span> remain unfilled and would require additional liquidity.
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })()}
-                    
-                    <div className="bg-white rounded-lg shadow p-6 mb-6">
-                        <h3 className="text-lg font-semibold mb-4">Orderbook Consumption</h3>
-                        <div className="space-y-2">
-                            {impact.levels_consumed.map((level, i) => (
-                                <div key={i} className="flex justify-between items-center p-3 bg-gray-50 rounded">
-                                    <span className="font-mono">@ {level.price}¢</span>
-                                    <span>
-                                        <span className="text-green-600">{level.filled} filled</span>
-                                        {level.remaining > 0 && (
-                                            <span className="text-gray-500 ml-2">({level.remaining} remain)</span>
-                                        )}
-                                    </span>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                    
-                    {/* Price Impact Chart */}
-                    {window.Recharts ? (
-                        <div className="bg-white rounded-lg shadow p-6">
-                            <h3 className="text-lg font-semibold mb-2">Price Impact Visualization</h3>
-                            <p className="text-sm text-gray-600 mb-4">
-                                Shows how your average execution price increases as order size grows due to consuming deeper orderbook levels
-                            </p>
-                            <ResponsiveContainer width="100%" height={350}>
-                                <ComposedChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                                    <defs>
-                                        <linearGradient id="executionGradient" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
-                                            <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                                        </linearGradient>
-                                    </defs>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                                    <XAxis 
-                                        dataKey="quantity" 
-                                        label={{ value: 'Order Size (contracts)', position: 'insideBottom', offset: -5 }}
-                                        stroke="#6b7280"
-                                    />
-                                    <YAxis 
-                                        label={{ value: 'Price (¢)', angle: -90, position: 'insideLeft' }}
-                                        stroke="#6b7280"
-                                        domain={['dataMin - 2', 'dataMax + 2']}
-                                    />
-                                    <Tooltip 
-                                        contentStyle={{ 
-                                            backgroundColor: 'white', 
-                                            border: '1px solid #e5e7eb',
-                                            borderRadius: '8px',
-                                            boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
-                                        }}
-                                        formatter={(value, name) => {
-                                            if (name === 'Your Execution Price') return [`${value.toFixed(2)}¢`, name];
-                                            if (name === 'Market Price') return [`${value.toFixed(2)}¢`, name];
-                                            if (name === 'Slippage') return [`${value.toFixed(2)}%`, name];
-                                            return [value, name];
-                                        }}
-                                        labelFormatter={(label) => `Order Size: ${label} contracts`}
-                                    />
-                                    <Legend 
-                                        wrapperStyle={{ paddingTop: '20px' }}
-                                        iconType="line"
-                                    />
-                                    {/* Area fill under execution price */}
-                                    <Area
-                                        type="monotone"
-                                        dataKey="executionPrice"
-                                        fill="url(#executionGradient)"
-                                        stroke="none"
-                                    />
-                                    {/* Market price baseline (dashed) */}
-                                    <Line 
-                                        type="monotone" 
-                                        dataKey="marketPrice" 
-                                        stroke="#9ca3af" 
-                                        strokeDasharray="5 5" 
-                                        name="Market Price"
-                                        strokeWidth={2}
-                                        dot={false}
-                                    />
-                                    {/* Your execution price (solid, emphasized) */}
-                                    <Line 
-                                        type="monotone" 
-                                        dataKey="executionPrice" 
-                                        stroke="#3b82f6" 
-                                        name="Your Execution Price"
-                                        strokeWidth={3}
-                                        dot={{ fill: '#3b82f6', r: 4 }}
-                                        activeDot={{ r: 6, fill: '#2563eb' }}
-                                    />
-                                </ComposedChart>
-                            </ResponsiveContainer>
-                            
-                            {/* Summary cards below chart */}
-                            <div className="grid grid-cols-3 gap-3 mt-6">
-                                <div className="bg-gray-50 rounded-lg p-3 text-center border border-gray-200">
-                                    <p className="text-xs text-gray-600 mb-1">Market Price</p>
-                                    <p className="text-lg font-bold text-gray-700">
-                                        {(side === 'yes' ? market.yes_price : market.no_price).toFixed(2)}¢
-                                    </p>
-                                    <p className="text-xs text-gray-500 mt-1">Current best {side === 'yes' ? 'ask' : 'bid'}</p>
-                                </div>
-                                <div className="bg-blue-50 rounded-lg p-3 text-center border border-blue-200">
-                                    <p className="text-xs text-blue-600 mb-1">Your Avg Price</p>
-                                    <p className="text-lg font-bold text-blue-700">
-                                        {impact.avg_price.toFixed(2)}¢
-                                    </p>
-                                    <p className="text-xs text-blue-600 mt-1">For {quantity} contracts</p>
-                                </div>
-                                <div className="bg-orange-50 rounded-lg p-3 text-center border border-orange-200">
-                                    <p className="text-xs text-orange-600 mb-1">Price Impact</p>
-                                    <p className="text-lg font-bold text-orange-700">
-                                        +{(impact.avg_price - (side === 'yes' ? market.yes_price : market.no_price)).toFixed(2)}¢
-                                    </p>
-                                    <p className="text-xs text-orange-600 mt-1">{impact.slippage.toFixed(1)}% slippage</p>
-                                </div>
-                            </div>
-                            
-                            <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
-                                <p className="text-sm text-blue-800">
-                                    <strong>💡 Interpretation:</strong> Your {quantity}-contract order would execute at an average price of {impact.avg_price.toFixed(1)}¢, 
-                                    which is {(impact.avg_price - (side === 'yes' ? market.yes_price : market.no_price)).toFixed(1)}¢ 
-                                    ({impact.slippage.toFixed(1)}%) higher than the current market price due to orderbook depth constraints.
-                                </p>
-                            </div>
-                        </div>
-                    ) : (
-                        <SimpleChart 
-                            data={chartData.map(d => ({ label: `${d.quantity}`, value: d.executionPrice }))}
-                            title="Price Impact by Order Size"
-                        />
-                    )}
-                </>
-            )}
-        </div>
-    );
-}
 
-// Volume Velocity Component
-function VolumeVelocity({ market }) {
-    const [data, setData] = useState(null);
-    
-    useEffect(() => {
-        if (market) {
-            setData(MockData.generateVelocity(market));
-        }
-    }, [market]);
-    
-    // Generate hourly chart data
-    const hourlyData = useMemo(() => {
-        if (!data || !market) return [];
-        const hours = [];
-        for (let i = 0; i < 24; i++) {
-            hours.push({
-                hour: `${i}:00`,
-                volume: Math.floor(Math.random() * 1000 + 100),
-                price: market.yes_price + (Math.random() - 0.5) * 10
-            });
-        }
-        // Add spike at peak hour
-        hours[14] = { hour: '14:00', volume: 2500, price: market.yes_price + 3 };
-        return hours;
-    }, [data, market]);
-    
-    if (!market) {
-        return (
-            <div className="text-center py-12 text-gray-500">
-                <p className="text-xl">Select a market to analyze volume velocity</p>
-            </div>
-        );
-    }
-    
-    if (!data) return null;
-    
-    return (
-        <div>
-            <MarketHeader market={market} />
-            
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div className="bg-blue-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Total Volume</p>
-                    <p className="text-2xl font-bold text-blue-600">{data.metrics.total_volume.toLocaleString()}</p>
-                </div>
-                <div className="bg-purple-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Recent Avg</p>
-                    <p className="text-2xl font-bold text-purple-600">{data.metrics.recent_avg.toLocaleString()}</p>
-                </div>
-                <div className="bg-orange-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Earlier Avg</p>
-                    <p className="text-2xl font-bold text-orange-600">{data.metrics.earlier_avg.toLocaleString()}</p>
-                </div>
-                <div className="bg-green-50 p-4 rounded-lg">
-                    <p className="text-sm text-gray-600">Velocity Change</p>
-                    <p className="text-2xl font-bold text-green-600">+{data.metrics.velocity_change}%</p>
-                </div>
-            </div>
-            
-            {/* Volume and Price Chart */}
-            {window.Recharts ? (
-                <div className="bg-white rounded-lg shadow p-6 mb-6">
-                    <h3 className="text-lg font-semibold mb-4">Volume & Price Over Time (24h)</h3>
-                    <ResponsiveContainer width="100%" height={300}>
-                        <ComposedChart data={hourlyData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
-                            <XAxis dataKey="hour" />
-                            <YAxis yAxisId="volume" orientation="left" />
-                            <YAxis yAxisId="price" orientation="right" />
-                            <Tooltip />
-                            <Legend />
-                            <Bar 
-                                yAxisId="volume" 
-                                dataKey="volume" 
-                                fill="#3b82f6" 
-                                opacity={0.7}
-                                name="Volume"
-                            />
-                            <Line 
-                                yAxisId="price" 
-                                type="monotone" 
-                                dataKey="price" 
-                                stroke="#10b981" 
-                                strokeWidth={3}
-                                name="Price (¢)"
-                                dot={{ fill: '#10b981', r: 2 }}
-                            />
-                        </ComposedChart>
-                    </ResponsiveContainer>
-                </div>
-            ) : (
-                <SimpleChart 
-                    data={hourlyData.map(d => ({ label: d.hour, value: d.volume }))}
-                    title="Volume Over Time (24h)"
-                />
-            )}
-            
-            {data.news_events.length > 0 && (
-                <div className="mb-6">
-                    <h3 className="text-lg font-semibold mb-3">📰 Detected News Events</h3>
-                    {data.news_events.map((event, i) => (
-                        <div key={i} className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded mb-3">
-                            <p className="font-semibold text-amber-900">{event.description}</p>
-                            <p className="text-sm text-gray-600 mt-1">
-                                Volume spike: {event.volume_spike.toLocaleString()} • Price: {event.price_at_event}¢
-                            </p>
-                        </div>
-                    ))}
-                </div>
-            )}
-            
-            <div className="bg-gradient-to-r from-blue-500 to-purple-600 text-white p-6 rounded-lg mb-6">
-                <h3 className="text-lg font-semibold mb-2">Peak Activity Analysis</h3>
-                <div className="flex justify-between items-center">
-                    <div>
-                        <p className="text-4xl font-bold">{data.peak.volume.toLocaleString()}</p>
-                        <p className="text-sm opacity-90 mt-1">contracts at {data.peak.hour}</p>
-                    </div>
-                    <div className="text-right">
-                        <p className="text-2xl mb-1">{data.peak.coincided_with_news ? '📰' : '⚡'}</p>
-                        <p className="text-sm">{data.peak.coincided_with_news ? 'News-driven' : 'Pure speculation'}</p>
-                    </div>
-                </div>
-            </div>
-            
-            {/* Volume Distribution Chart */}
-            {window.Recharts ? (
-                <div className="bg-white rounded-lg shadow p-6">
-                    <h3 className="text-lg font-semibold mb-4">Hourly Volume Distribution</h3>
-                    <ResponsiveContainer width="100%" height={200}>
-                        <BarChart data={hourlyData.slice(0, 12)} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
-                            <XAxis dataKey="hour" />
-                            <YAxis />
-                            <Tooltip formatter={(value) => value.toLocaleString()} />
-                            <Bar dataKey="volume" fill="#8b5cf6">
-                                {hourlyData.slice(0, 12).map((entry, index) => (
-                                    <Cell key={`cell-${index}`} fill={entry.volume > 1500 ? '#ef4444' : '#8b5cf6'} />
-                                ))}
-                            </Bar>
-                        </BarChart>
-                    </ResponsiveContainer>
-                    <p className="text-sm text-gray-600 mt-3">
-                        Red bars indicate high-volume periods (&gt; 1500 contracts/hour)
-                    </p>
-                </div>
-            ) : (
-                <SimpleChart 
-                    data={hourlyData.slice(0, 12).map(d => ({ label: d.hour, value: d.volume }))}
-                    title="Hourly Volume Distribution"
-                />
-            )}
-            
-            <div className="bg-gray-50 rounded-lg p-6 mt-6">
-                <h3 className="text-lg font-semibold mb-3">💡 Trading Insights</h3>
-                <p className="text-gray-700">
-                    {data.news_events.length > 0 ? (
-                        `This market shows ${data.news_events.length} news-driven volume spike(s). Trading activity appears to be correlated with external events. Consider monitoring news sources and setting alerts for similar events.`
-                    ) : (
-                        `No major news events detected during high-volume periods. Trading appears to be driven by pure speculation and market sentiment. This market may be more susceptible to momentum-based strategies.`
-                    )}
-                </p>
-            </div>
-        </div>
-    );
-}
-
-// Comparison Component
-function Comparison({ markets }) {
-    const [selected, setSelected] = useState([]);
-    
-    const toggle = (market) => {
-        if (selected.find(m => m.ticker === market.ticker)) {
-            setSelected(selected.filter(m => m.ticker !== market.ticker));
-        } else if (selected.length < 4) {
-            setSelected([...selected, market]);
-        }
-    };
-    
-    // Prepare comparison chart data
-    const comparisonData = useMemo(() => {
-        return selected.map(market => ({
-            ticker: market.ticker,
-            price: market.yes_price,
-            volume: Math.round(market.volume / 100), // Scale down for visibility
-            volatility: parseFloat(market.volatility) * 10,
-            spread: ((market.yes_ask - market.yes_bid) / market.yes_price * 100) * 10
-        }));
-    }, [selected]);
-    
-    return (
-        <div>
-            <div className="bg-white rounded-lg shadow p-6 mb-6">
-                <h3 className="text-lg font-semibold mb-4">Select Markets to Compare (Max 4)</h3>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    {markets.map(market => (
-                        <button
-                            key={market.ticker}
-                            onClick={() => toggle(market)}
-                            className={`p-3 rounded-lg border-2 transition ${
-                                selected.find(m => m.ticker === market.ticker)
-                                    ? 'border-blue-500 bg-blue-50'
-                                    : 'border-gray-200 hover:border-gray-300'
-                            }`}
-                        >
-                            <p className="font-mono text-xs">{market.ticker}</p>
-                            <p className="text-sm">{market.title.substring(0, 40)}...</p>
-                        </button>
-                    ))}
-                </div>
-            </div>
-            
-            {selected.length > 1 && (
-                <>
-                    <div className="bg-white rounded-lg shadow overflow-hidden mb-6">
-                        <table className="w-full">
-                            <thead className="bg-gray-50">
-                                <tr>
-                                    <th className="px-4 py-3 text-left">Market</th>
-                                    <th className="px-4 py-3 text-center">YES Price</th>
-                                    <th className="px-4 py-3 text-center">Volume</th>
-                                    <th className="px-4 py-3 text-center">Volatility</th>
-                                    <th className="px-4 py-3 text-center">Spread</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {selected.map(market => (
-                                    <tr key={market.ticker} className="border-t hover:bg-gray-50">
-                                        <td className="px-4 py-3">
-                                            <p className="font-mono text-sm">{market.ticker}</p>
-                                            <p className="text-xs text-gray-500">{market.title.substring(0, 50)}...</p>
-                                        </td>
-                                        <td className="px-4 py-3 text-center">
-                                            <span className="text-lg font-bold text-green-600">{market.yes_price}¢</span>
-                                        </td>
-                                        <td className="px-4 py-3 text-center">{market.volume.toLocaleString()}</td>
-                                        <td className="px-4 py-3 text-center">
-                                            <span className={`px-2 py-1 rounded text-xs ${
-                                                parseFloat(market.volatility) > 8 ? 'bg-red-100 text-red-700' :
-                                                parseFloat(market.volatility) > 6 ? 'bg-yellow-100 text-yellow-700' :
-                                                'bg-green-100 text-green-700'
-                                            }`}>
-                                                {market.volatility}
-                                            </span>
-                                        </td>
-                                        <td className="px-4 py-3 text-center">
-                                            {((market.yes_ask - market.yes_bid) / market.yes_price * 100).toFixed(1)}%
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                    
-                    {/* Comparison Chart */}
-                    {window.Recharts ? (
-                        <div className="bg-white rounded-lg shadow p-6">
-                            <h3 className="text-lg font-semibold mb-4">Visual Comparison</h3>
-                            <ResponsiveContainer width="100%" height={300}>
-                                <BarChart data={comparisonData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
-                                    <XAxis dataKey="ticker" />
-                                    <YAxis />
-                                    <Tooltip />
-                                    <Legend />
-                                    <Bar dataKey="price" fill="#10b981" name="Price (¢)" />
-                                    <Bar dataKey="volume" fill="#3b82f6" name="Volume (÷100)" />
-                                    <Bar dataKey="volatility" fill="#f59e0b" name="Volatility (×10)" />
-                                    <Bar dataKey="spread" fill="#8b5cf6" name="Spread% (×10)" />
-                                </BarChart>
-                            </ResponsiveContainer>
-                            <p className="text-sm text-gray-600 mt-3">
-                                Note: Volume divided by 100, Volatility and Spread multiplied by 10 for scale
-                            </p>
-                        </div>
-                    ) : (
-                        <div className="bg-white rounded-lg shadow p-6">
-                            <h3 className="text-lg font-semibold mb-4">Visual Comparison</h3>
-                            <div className="grid grid-cols-2 gap-4">
-                                <SimpleChart 
-                                    data={comparisonData.map(d => ({ label: d.ticker, value: d.price }))}
-                                    title="Price Comparison (¢)"
-                                />
-                                <SimpleChart 
-                                    data={comparisonData.map(d => ({ label: d.ticker, value: d.volume }))}
-                                    title="Volume Comparison (÷100)"
-                                />
-                            </div>
-                        </div>
-                    )}
-                    
-                    <div className="bg-blue-50 rounded-lg p-6 mt-6">
-                        <h3 className="text-lg font-semibold mb-3">📊 Comparison Summary</h3>
-                        <div className="grid grid-cols-2 gap-4">
-                            <div>
-                                <p className="text-sm text-gray-600 mb-1">Highest Price:</p>
-                                <p className="font-semibold">
-                                    {selected.reduce((max, m) => m.yes_price > max.yes_price ? m : max).ticker} 
-                                    ({selected.reduce((max, m) => m.yes_price > max.yes_price ? m : max).yes_price}¢)
-                                </p>
-                            </div>
-                            <div>
-                                <p className="text-sm text-gray-600 mb-1">Most Volume:</p>
-                                <p className="font-semibold">
-                                    {selected.reduce((max, m) => m.volume > max.volume ? m : max).ticker}
-                                    ({selected.reduce((max, m) => m.volume > max.volume ? m : max).volume.toLocaleString()})
-                                </p>
-                            </div>
-                            <div>
-                                <p className="text-sm text-gray-600 mb-1">Most Volatile:</p>
-                                <p className="font-semibold">
-                                    {selected.reduce((max, m) => parseFloat(m.volatility) > parseFloat(max.volatility) ? m : max).ticker}
-                                    (σ{selected.reduce((max, m) => parseFloat(m.volatility) > parseFloat(max.volatility) ? m : max).volatility})
-                                </p>
-                            </div>
-                            <div>
-                                <p className="text-sm text-gray-600 mb-1">Tightest Spread:</p>
-                                <p className="font-semibold">
-                                    {selected.reduce((min, m) => (m.yes_ask - m.yes_bid) < (min.yes_ask - min.yes_bid) ? m : min).ticker}
-                                    ({((selected.reduce((min, m) => (m.yes_ask - m.yes_bid) < (min.yes_ask - min.yes_bid) ? m : min).yes_ask - 
-                                       selected.reduce((min, m) => (m.yes_ask - m.yes_bid) < (min.yes_ask - min.yes_bid) ? m : min).yes_bid) / 
-                                       selected.reduce((min, m) => (m.yes_ask - m.yes_bid) < (min.yes_ask - min.yes_bid) ? m : min).yes_price * 100).toFixed(1)}%)
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                </>
-            )}
-            
-            {selected.length === 0 && (
-                <div className="text-center py-12 text-gray-400">
-                    <p className="text-lg">Select at least 2 markets to compare</p>
-                </div>
-            )}
-            
-            {selected.length === 1 && (
-                <div className="text-center py-12 text-gray-400">
-                    <p className="text-lg">Select one more market to start comparison</p>
-                </div>
-            )}
-        </div>
-    );
-}
-
-// Main App Component
-function App() {
-    const [activeTab, setActiveTab] = useState('impact');
-    const [markets] = useState(MockData.markets);
-    const [selectedMarket, setSelectedMarket] = useState(MockData.markets[0]);
-    const [searchQuery, setSearchQuery] = useState('');
-    
-    const filteredMarkets = useMemo(() => {
-        if (!searchQuery) return markets;
-        const query = searchQuery.toLowerCase();
-        return markets.filter(m => 
-            m.ticker.toLowerCase().includes(query) || 
-            m.title.toLowerCase().includes(query)
-        );
-    }, [markets, searchQuery]);
-    
-    return (
-        <div className="min-h-screen bg-gray-50">
-            {/* Header */}
-            <header className="bg-gradient-to-r from-blue-600 to-purple-600 text-white p-6 shadow-lg">
-                <h1 className="text-3xl font-bold">Kalshi Market Tools</h1>
-                <p className="text-blue-100 mt-1">Advanced analytics for event contract trading</p>
-            </header>
-            
-            {/* Navigation */}
-            <nav className="bg-white shadow-sm">
-                <div className="flex space-x-8 px-6">
-                    <button
-                        onClick={() => setActiveTab('impact')}
-                        className={`py-4 px-2 font-medium transition ${
-                            activeTab === 'impact' ? 'tab-active' : 'text-gray-600'
-                        }`}
-                    >
-                        Market Impact
-                    </button>
-                    <button
-                        onClick={() => setActiveTab('velocity')}
-                        className={`py-4 px-2 font-medium transition ${
-                            activeTab === 'velocity' ? 'tab-active' : 'text-gray-600'
-                        }`}
-                    >
-                        Volume Velocity
-                    </button>
-                    <button
-                        onClick={() => setActiveTab('comparison')}
-                        className={`py-4 px-2 font-medium transition ${
-                            activeTab === 'comparison' ? 'tab-active' : 'text-gray-600'
-                        }`}
-                    >
-                        Multi-Market
-                    </button>
-                </div>
-            </nav>
-            
-            {/* Main Content */}
-            <main className="container mx-auto px-6 py-6">
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    {/* Sidebar */}
-                    <aside className="lg:sticky lg:top-4">
-                        <div className="bg-white rounded-lg shadow p-4">
-                            <h3 className="font-semibold text-lg mb-4">Markets</h3>
-                            <input
-                                type="text"
-                                placeholder="Search markets..."
-                                value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
-                                className="w-full px-3 py-2 border rounded-lg mb-4 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                            />
-                            <div className="space-y-2 overflow-y-auto" style={{ maxHeight: '600px' }}>
-                                {filteredMarkets.map(market => (
-                                    <MarketCard
-                                        key={market.ticker}
-                                        market={market}
-                                        isSelected={selectedMarket?.ticker === market.ticker}
-                                        onClick={() => setSelectedMarket(market)}
-                                    />
-                                ))}
-                            </div>
-                        </div>
-                    </aside>
-                    
-                    {/* Content */}
-                    <div className="lg:col-span-2">
-                        {activeTab === 'impact' && <ImpactCalculator market={selectedMarket} />}
-                        {activeTab === 'velocity' && <VolumeVelocity market={selectedMarket} />}
-                        {activeTab === 'comparison' && <Comparison markets={filteredMarkets} />}
-                    </div>
-                </div>
-            </main>
-            
-            {/* Footer */}
-            <footer className="bg-gray-800 text-white mt-12 py-8">
-                <div className="container mx-auto px-6">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                        <div>
-                            <h4 className="font-semibold mb-3">Kalshi Market Tools</h4>
-                            <p className="text-gray-400 text-sm">
-                                Professional analytics for event contract trading. 
-                                Not affiliated with Kalshi Inc.
-                            </p>
-                        </div>
-                        <div>
-                            <h4 className="font-semibold mb-3">Features</h4>
-                            <ul className="text-gray-400 text-sm space-y-1">
-                                <li>• Order impact calculator</li>
-                                <li>• Volume velocity tracking</li>
-                                <li>• News event correlation</li>
-                                <li>• Multi-market comparison</li>
-                            </ul>
-                        </div>
-                        <div>
-                            <h4 className="font-semibold mb-3">Status</h4>
-                            <p className="text-gray-400 text-sm">
-                                <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-2"></span>
-                                Mock Data Mode
-                            </p>
-                            <p className="text-gray-400 text-sm mt-2">
-                                Charts: {window.Recharts ? '📊 Advanced Charts' : '📈 Basic Charts'}
-                            </p>
-                        </div>
-                    </div>
-                    <div className="mt-8 pt-8 border-t border-gray-700 text-center text-sm text-gray-400">
-                        <p>© 2024 Kalshi Market Tools • Data for demonstration purposes only</p>
-                    </div>
-                </div>
-            </footer>
-        </div>
-    );
-}
-
-// Render the app
-console.log('Rendering app...');
-
-// Wait for DOM to be ready
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        ReactDOM.render(<App />, document.getElementById('root'));
-        console.log('App rendered successfully!');
-    });
-} else {
-    ReactDOM.render(<App />, document.getElementById('root'));
-    console.log('App rendered successfully!');
-}
-
-// Try to load Recharts again after a delay if it failed
-if (!window.Recharts) {
-    setTimeout(() => {
-        if (window.Recharts) {
-            console.log('Recharts loaded after delay - refreshing...');
-            window.location.reload();
-        }
-    }, 2000);
-}
-</script>
+    ReactDOM.render(<App/>, document.getElementById('root'));
+  </script>
 </body>
 </html>
