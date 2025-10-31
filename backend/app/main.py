@@ -2,75 +2,47 @@ import os
 import json
 import asyncio
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from sqlalchemy import create_engine, Column, String, Integer, BigInteger, DateTime, ForeignKey, select, func
-from sqlalchemy.orm import sessionmaker, DeclarativeBase, mapped_column, Mapped
+# Import your existing modules
+from .kalshi_client import KalshiClient
+from .database import Database
+from .market_analyzer import MarketAnalyzer
 
 # ---------- Config ----------
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dev.db")
-PULL_INTERVAL_SECONDS = int(os.getenv("PULL_INTERVAL_SECONDS", "15"))
+KALSHI_API_KEY = os.getenv("KALSHI_API_KEY")
+KALSHI_PRIVATE_KEY = os.getenv("KALSHI_PRIVATE_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/kalshi_dev")
+PULL_INTERVAL_SECONDS = int(os.getenv("PULL_INTERVAL_SECONDS", "30"))
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
-# ---------- DB setup ----------
-class Base(DeclarativeBase):
-    pass
-
-class Market(Base):
-    __tablename__ = "markets"
-    ticker: Mapped[str] = mapped_column(String, primary_key=True)
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    last_update: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-class Quote(Base):
-    __tablename__ = "quotes"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ticker: Mapped[str] = mapped_column(String, ForeignKey("markets.ticker"), index=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, default=lambda: datetime.now(timezone.utc))
-    yes_bid: Mapped[int] = mapped_column(Integer, default=0)
-    yes_ask: Mapped[int] = mapped_column(Integer, default=0)
-    no_bid: Mapped[int] = mapped_column(Integer, default=0)
-    no_ask: Mapped[int] = mapped_column(Integer, default=0)
-    yes_last: Mapped[int] = mapped_column(Integer, default=0)
-    no_last: Mapped[int] = mapped_column(Integer, default=0)
-    volume: Mapped[int] = mapped_column(Integer, default=0)
-
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
-
-def init_db():
-    Base.metadata.create_all(bind=engine)
-
-# ---------- App ----------
-app = FastAPI(title="Kalshi Pipeline API", version="0.1.0")
-
-# origins = [o.strip() for o in os.getenv("FRONTEND_ORIGINS", "*").split(",") if o.strip()]
-# allow_all = "*" in origins or not origins
+# ---------- App Setup ----------
+app = FastAPI(title="Kalshi Pipeline API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],         # TEMP: allow all to verify
-    allow_credentials=False,     # keep False for SSE simplicity
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# ---------- SSE subscribers ----------
+# ---------- Global instances ----------
+db = None
+kalshi_client = None
 _subscribers: List[asyncio.Queue] = []
 
+# ---------- SSE Broadcasting ----------
 async def broadcast(payload: Dict[str, Any]):
-    # push to all subscribers
     for q in list(_subscribers):
         try:
             await q.put(payload)
-        except Exception:
+        except:
             pass
 
 async def sse_generator():
@@ -88,125 +60,205 @@ async def sse_generator():
 async def stream():
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
-# ---------- Schemas ----------
-class MarketOut(BaseModel):
-    ticker: str
-    title: str
-    category: Optional[str] = None
-    last_update: Optional[datetime] = None
-    yes_price: Optional[int] = 0
-    no_price: Optional[int] = 0
-    volume_24h: Optional[int] = 0
+# ---------- Data Fetching ----------
+async def fetch_and_store_markets():
+    """Fetch markets from Kalshi and store in PostgreSQL"""
+    try:
+        if not kalshi_client:
+            print("⚠️ No Kalshi client - using mock data")
+            return await fetch_mock_data()
+        
+        # Get open markets
+        markets = await kalshi_client.get_markets(status="open", limit=50)
+        
+        # Process each market
+        market_updates = []
+        for market in markets:
+            ticker = market.get("ticker")
+            
+            # Get orderbook for pricing
+            try:
+                orderbook = await kalshi_client.get_orderbook(ticker, depth=5)
+                
+                # Extract best bid/ask
+                yes_bid = orderbook["yes"][0]["price"] if orderbook.get("yes") else 0
+                yes_ask = orderbook["yes"][-1]["price"] if orderbook.get("yes") else 100
+                no_bid = orderbook["no"][0]["price"] if orderbook.get("no") else 0
+                no_ask = orderbook["no"][-1]["price"] if orderbook.get("no") else 100
+                
+                # Calculate mid prices
+                yes_price = (yes_bid + yes_ask) / 2
+                no_price = (no_bid + no_ask) / 2
+                
+                # Update market data
+                market.update({
+                    "yes_price": yes_price,
+                    "no_price": no_price,
+                    "yes_bid": yes_bid,
+                    "yes_ask": yes_ask,
+                    "no_bid": no_bid,
+                    "no_ask": no_ask
+                })
+                
+                # Cache in database
+                await db.cache_market(market)
+                
+                # Get recent trades
+                trades = await kalshi_client.get_trades(ticker, limit=20)
+                for trade in trades:
+                    await db.cache_trade(ticker, trade)
+                
+                # Prepare update for SSE
+                market_updates.append({
+                    "ticker": ticker,
+                    "title": market.get("title"),
+                    "category": market.get("category"),
+                    "yes_price": round(yes_price),
+                    "no_price": round(no_price),
+                    "volume_24h": market.get("volume", 0)
+                })
+                
+            except Exception as e:
+                print(f"Error processing {ticker}: {e}")
+                continue
+        
+        # Broadcast updates
+        if market_updates:
+            await broadcast({
+                "type": "upsert",
+                "markets": market_updates,
+                "ts": datetime.now(timezone.utc).isoformat()
+            })
+            
+        print(f"✅ Updated {len(market_updates)} markets")
+        
+    except Exception as e:
+        print(f"❌ Error fetching markets: {e}")
+        # Fall back to cached data
+        return await fetch_mock_data()
+
+async def fetch_mock_data():
+    """Fallback mock data when Kalshi unavailable"""
+    import random
+    mock_markets = [
+        {"ticker": "RATE-CUT-DEC", "title": "Fed cuts rates in December?", 
+         "category": "Fed", "yes_price": random.randint(30,70), 
+         "no_price": 100-random.randint(30,70), "volume_24h": random.randint(1000,5000)}
+    ]
+    await broadcast({"type": "upsert", "markets": mock_markets, 
+                    "ts": datetime.now(timezone.utc).isoformat()})
 
 # ---------- Routes ----------
 @app.get("/health")
-def health():
-    return {"ok": True, "time": datetime.now(timezone.utc).isoformat()}
+async def health():
+    return {
+        "ok": True,
+        "time": datetime.now(timezone.utc).isoformat(),
+        "database": db is not None,
+        "kalshi": kalshi_client is not None
+    }
 
-@app.get("/markets", response_model=List[MarketOut])
-def get_markets():
-    with SessionLocal() as s:
-        # latest quote per ticker
-        subq = (
-            select(Quote.ticker, func.max(Quote.ts).label("max_ts"))
-            .group_by(Quote.ticker)
-            .subquery()
-        )
-        q = (
-            select(
-                Market.ticker, Market.title, Market.category, Market.last_update,
-                Quote.yes_last, Quote.no_last,
-                Quote.volume
-            )
-            .join(subq, subq.c.ticker == Market.ticker, isouter=True)
-            .join(Quote, (Quote.ticker == subq.c.ticker) & (Quote.ts == subq.c.max_ts), isouter=True)
-            .order_by(Market.ticker)
-        )
-        rows = s.execute(q).all()
-        out = []
-        for row in rows:
-            ticker, title, category, last_update, yes_last, no_last, volume = row
-            out.append(
-                MarketOut(
-                    ticker=ticker, title=title, category=category, last_update=last_update,
-                    yes_price=yes_last or 0, no_price=no_last or 0, volume_24h=volume or 0
-                ).model_dump()
-            )
-        return out
+@app.get("/markets")
+async def get_markets():
+    """Get all cached markets from database"""
+    if not db:
+        return []
+    
+    markets = await db.get_cached_markets(status="open", limit=100)
+    
+    # Format for frontend
+    formatted = []
+    for market in markets:
+        formatted.append({
+            "ticker": market.get("ticker"),
+            "title": market.get("title"),
+            "category": market.get("category"),
+            "yes_price": market.get("yes_price", 0),
+            "no_price": market.get("no_price", 0),
+            "yes_bid": market.get("yes_bid", 0),
+            "yes_ask": market.get("yes_ask", 0),
+            "no_bid": market.get("no_bid", 0),
+            "no_ask": market.get("no_ask", 0),
+            "volume_24h": market.get("volume", 0),
+            "last_update": market.get("last_updated")
+        })
+    
+    return formatted
 
 @app.get("/markets/{ticker}")
-def get_market_detail(ticker: str):
-    with SessionLocal() as s:
-        m = s.get(Market, ticker)
-        if not m:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        q = (
-            select(Quote.ts, Quote.yes_last, Quote.no_last, Quote.volume)
-            .where(Quote.ticker == ticker)
-            .order_by(Quote.ts.desc())
-            .limit(500)
-        )
-        rows = s.execute(q).all()
-        return {
-            "ticker": ticker,
-            "title": m.title,
-            "category": m.category,
-            "series": [{"ts": ts.isoformat(), "yes": y or 0, "no": n or 0, "vol": v or 0} for ts, y, n, v in rows[::-1]]
-        }
+async def get_market_detail(ticker: str):
+    """Get detailed market data including historical trades"""
+    if not db:
+        return JSONResponse({"error": "Database not available"}, status_code=503)
+    
+    market = await db.get_market_by_ticker(ticker)
+    if not market:
+        return JSONResponse({"error": "Market not found"}, status_code=404)
+    
+    trades = await db.get_cached_trades(ticker, limit=500)
+    
+    # Calculate volume velocity if analyzer available
+    velocity = None
+    if db and kalshi_client:
+        analyzer = MarketAnalyzer(db, kalshi_client)
+        velocity = await analyzer.calculate_volume_velocity(ticker)
+    
+    return {
+        "ticker": ticker,
+        "title": market.get("title"),
+        "category": market.get("category"),
+        "series": trades,
+        "velocity": velocity
+    }
 
-# ---------- Background puller (stub that simulates data without Kalshi creds) ----------
-import random
-
-def _seed_if_empty():
-    with SessionLocal() as s:
-        if s.get(Market, "RATE-CUT-DEC") is None:
-            s.add_all([
-                Market(ticker="RATE-CUT-DEC", title="Fed cuts rates in December?", category="Fed", last_update=datetime.now(timezone.utc)),
-                Market(ticker="POTUS-2024", title="Who wins the 2024 U.S. Presidential Election?", category="Politics", last_update=datetime.now(timezone.utc)),
-            ])
-            s.commit()
-
-def pull_once():
-    # In production: call Kalshi API here and upsert
-    # For now, simulate quotes to prove end-to-end
-    now = datetime.now(timezone.utc)
-    with SessionLocal() as s:
-        for m in s.query(Market).all():
-            y = random.randint(30, 70)
-            n = 100 - y
-            vol = random.randint(0, 5000)
-            s.add(Quote(ticker=m.ticker, ts=now, yes_last=y, no_last=n, volume=vol))
-            m.last_update = now
-        s.commit()
-
+# ---------- Background Tasks ----------
 async def pull_loop():
+    """Main data fetching loop"""
     while True:
-        pull_once()
-        # broadcast a compact patch for the UI
-        with SessionLocal() as s:
-            out = []
-            for m in s.query(Market).all():
-                # get latest quote for ticker m
-                latest = s.execute(
-                    select(Quote).where(Quote.ticker == m.ticker).order_by(Quote.ts.desc()).limit(1)
-                ).scalars().first()
-                if latest:
-                    out.append({
-                        "ticker": m.ticker,
-                        "yes_price": latest.yes_last,
-                        "no_price": latest.no_last,
-                        "volume_24h": latest.volume
-                    })
-        await broadcast({"type": "upsert", "markets": out, "ts": datetime.now(timezone.utc).isoformat()})
+        await fetch_and_store_markets()
         await asyncio.sleep(PULL_INTERVAL_SECONDS)
 
-# ---------- Lifespan ----------
+async def cleanup_loop():
+    """Cleanup old data periodically"""
+    while True:
+        if db:
+            await db.clear_old_data(days=7)
+        await asyncio.sleep(3600 * 24)  # Run daily
+
+# ---------- Startup/Shutdown ----------
 @app.on_event("startup")
-async def on_startup():
-    init_db()
-    _seed_if_empty()
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(pull_once, "interval", seconds=PULL_INTERVAL_SECONDS)
-    scheduler.start()
-    # Also kick off an async loop that broadcasts to SSE
+async def startup():
+    global db, kalshi_client
+    
+    # Initialize database
+    if DATABASE_URL:
+        try:
+            db = Database(DATABASE_URL)
+            await db.initialize()
+            print("✅ Database connected")
+        except Exception as e:
+            print(f"❌ Database connection failed: {e}")
+    
+    # Initialize Kalshi client
+    if KALSHI_API_KEY and KALSHI_PRIVATE_KEY:
+        try:
+            kalshi_client = KalshiClient(KALSHI_API_KEY, KALSHI_PRIVATE_KEY)
+            print("✅ Kalshi client initialized")
+        except Exception as e:
+            print(f"❌ Kalshi client failed: {e}")
+    else:
+        print("⚠️ No Kalshi credentials - using mock mode")
+    
+    # Start background tasks
     asyncio.create_task(pull_loop())
+    asyncio.create_task(cleanup_loop())
+    
+    # Initial data fetch
+    await fetch_and_store_markets()
+
+@app.on_event("shutdown")
+async def shutdown():
+    if db:
+        await db.close()
+    if kalshi_client:
+        kalshi_client.close()

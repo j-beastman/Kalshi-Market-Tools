@@ -17,3 +17,5 @@ cachetools==5.3.2
 redis==5.0.1
 apscheduler==3.10.4
 psycopg2-binary==2.9.9
+asyncpg==0.29.0  # For async PostgreSQL
+python-jose==3.3.0  # For JWT if needed by Kalshi
