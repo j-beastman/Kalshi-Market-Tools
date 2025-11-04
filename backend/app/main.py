@@ -337,3 +337,67 @@ async def debug_kalshi():
             "error": str(e),
             "traceback": traceback.format_exc()
         }
+    
+@app.get("/disputes")
+async def get_disputes():
+    """Get historical dispute data for analysis"""
+    # For testing, return mock data
+    # Later, query historical settled markets from database
+    
+    disputes = []
+    
+    # Check if we have historical data in database
+    if db:
+        # Query for markets that settled early or had disputes
+        # This would require tracking settlement patterns
+        pass
+    
+    # Return test data for now
+    return {
+        "disputes": [
+            {
+                "ticker": "TENNIS-CINCY-AUG2025",
+                "title": "Medvedev vs. Alcaraz - Cincinnati Open Final",
+                "date": "2025-08-18",
+                "status": "early_settlement",
+                "reason": "Player withdrawal - injury",
+                "settlement_price": 100,
+                "volume_at_settlement": 45000,
+                "abnormal_pattern": True,
+                "description": "Market settled early due to Medvedev withdrawal with ankle injury"
+            },
+            {
+                "ticker": "NBA-FINALS-GAME5",
+                "title": "Lakers vs Celtics Game 5",
+                "date": "2025-06-12",
+                "status": "normal",
+                "reason": "Game completed normally",
+                "settlement_price": 0,
+                "volume_at_settlement": 120000,
+                "abnormal_pattern": False,
+                "description": "Normal market settlement after game completion"
+            }
+        ]
+    }
+
+@app.get("/disputes/{ticker}/analysis")
+async def analyze_dispute(ticker: str):
+    """Analyze trading patterns for a disputed market"""
+    # This would pull historical trade data and analyze patterns
+    # For now, return mock analysis
+    
+    return {
+        "ticker": ticker,
+        "pattern_analysis": {
+            "volume_spikes": [
+                {"time": "T-2h", "volume": 15000, "unusual": True},
+                {"time": "T-30m", "volume": 8000, "unusual": False}
+            ],
+            "price_movements": [
+                {"time": "T-3h", "price": 45, "expected": 50},
+                {"time": "T-1h", "price": 85, "expected": 52}
+            ],
+            "anomaly_score": 8.5,  # 0-10 scale
+            "confidence": 0.87
+        }
+    }
