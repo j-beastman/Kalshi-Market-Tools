@@ -2,47 +2,71 @@ import os
 import json
 import asyncio
 from datetime import datetime, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Import your existing modules
-from .kalshi_client import KalshiClient
-from .database import Database
-from .market_analyzer import MarketAnalyzer
+from sqlalchemy import create_engine, Column, String, Integer, BigInteger, DateTime, ForeignKey, select, func
+from sqlalchemy.orm import sessionmaker, DeclarativeBase, mapped_column, Mapped
 
 # ---------- Config ----------
-KALSHI_API_KEY = os.getenv("KALSHI_API_KEY")
-KALSHI_PRIVATE_KEY = os.getenv("KALSHI_PRIVATE_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/kalshi_dev")
-PULL_INTERVAL_SECONDS = int(os.getenv("PULL_INTERVAL_SECONDS", "30"))
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dev.db")
+PULL_INTERVAL_SECONDS = int(os.getenv("PULL_INTERVAL_SECONDS", "15"))
 
-# ---------- App Setup ----------
+# ---------- DB setup ----------
+class Base(DeclarativeBase):
+    pass
+
+class Market(Base):
+    __tablename__ = "markets"
+    ticker: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_update: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class Quote(Base):
+    __tablename__ = "quotes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String, ForeignKey("markets.ticker"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, default=lambda: datetime.now(timezone.utc))
+    yes_bid: Mapped[int] = mapped_column(Integer, default=0)
+    yes_ask: Mapped[int] = mapped_column(Integer, default=0)
+    no_bid: Mapped[int] = mapped_column(Integer, default=0)
+    no_ask: Mapped[int] = mapped_column(Integer, default=0)
+    yes_last: Mapped[int] = mapped_column(Integer, default=0)
+    no_last: Mapped[int] = mapped_column(Integer, default=0)
+    volume: Mapped[int] = mapped_column(Integer, default=0)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
+
+# ---------- App ----------
 app = FastAPI(title="Kalshi Pipeline API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# ---------- Global instances ----------
-db = None
-kalshi_client = None
+# ---------- SSE subscribers ----------
 _subscribers: List[asyncio.Queue] = []
 
-# ---------- SSE Broadcasting ----------
 async def broadcast(payload: Dict[str, Any]):
     for q in list(_subscribers):
         try:
             await q.put(payload)
-        except:
+        except Exception:
             pass
 
 async def sse_generator():
@@ -60,345 +84,320 @@ async def sse_generator():
 async def stream():
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
-# ---------- Data Fetching ----------
-async def fetch_and_store_markets():
-    """Fetch markets from Kalshi and store in PostgreSQL"""
-    try:
-        if not kalshi_client:
-            print("No Kalshi client - using mock data")
-            return await fetch_mock_data()
-        
-        # Get open markets
-        markets = await kalshi_client.get_markets({"limit": 100, "mve_filter": "exclude", "status": "open"})
-        
-        # Filter out complex multi-game markets that might not have standard orderbooks
-        # filtered_markets = [
-        #     m for m in markets 
-        #     if not m.get("ticker", "").startswith("KXMVENFLMULTIGAME")
-        # ]
-        filtered_markets = markets
-        
-        print(f"📊 Processing {len(filtered_markets)} markets (filtered from {len(markets)})")
-        
-        # Process each market
-        market_updates = []
-        for market in filtered_markets:
-            ticker = market.get("ticker")
-            
-            try:
-                # Get orderbook for pricing
-                orderbook = await kalshi_client.get_orderbook(ticker, depth=5)
-                
-                # TODO: Change this such that it throws an error instead of outputting these values
-                yes_price = 50  # Default
-                no_price = 50
-                yes_bid = 0
-                yes_ask = 100
-                no_bid = 0
-                no_ask = 100
-                
-                # Extract best bid/ask from yes side
-                if orderbook.get("yes") and len(orderbook["yes"]) > 0:
-                    yes_levels = sorted(orderbook["yes"], key=lambda x: x.get("price", 0))
-                    if yes_levels:
-                        yes_bid = yes_levels[0].get("price", 0)
-                        yes_ask = yes_levels[-1].get("price", 100)
-                        yes_price = (yes_bid + yes_ask) / 2
-                
-                # Extract best bid/ask from no side
-                if orderbook.get("no") and len(orderbook["no"]) > 0:
-                    no_levels = sorted(orderbook["no"], key=lambda x: x.get("price", 0))
-                    if no_levels:
-                        no_bid = no_levels[0].get("price", 0)
-                        no_ask = no_levels[-1].get("price", 100)
-                        no_price = (no_bid + no_ask) / 2
-                
-                # If we don't have orderbook data, try to use market's last price
-                if yes_price == 50 and no_price == 50:
-                    yes_price = market.get("yes_price", market.get("last_price", 50))
-                    no_price = market.get("no_price", 100 - yes_price)
-                
-                # Update market data
-                market.update({
-                    "yes_price": yes_price,
-                    "no_price": no_price,
-                    "yes_bid": yes_bid,
-                    "yes_ask": yes_ask,
-                    "no_bid": no_bid,
-                    "no_ask": no_ask
-                })
-                
-                # Cache in database
-                await db.cache_market(market)
-                
-                # Get recent trades (with error handling)
-                try:
-                    trades = await kalshi_client.get_trades(ticker, limit=20)
-                    for trade in trades:
-                        await db.cache_trade(ticker, trade)
-                except Exception as e:
-                    print(f"Could not fetch trades for {ticker}: {e}")
-                
-                # Prepare update for SSE
-                market_updates.append({
-                    "ticker": ticker,
-                    "title": market.get("title"),
-                    "category": market.get("category"),
-                    "yes_price": round(yes_price),
-                    "no_price": round(no_price),
-                    "volume_24h": market.get("volume", 0)
-                })
-                
-                print(f"✅ Processed {ticker}: YES={round(yes_price)}¢ NO={round(no_price)}¢")
-                
-            except Exception as e:
-                print(f"⚠️ Error processing {ticker}: {e}")
-                # Still add the market with basic info
-                market_updates.append({
-                    "ticker": ticker,
-                    "title": market.get("title"),
-                    "category": market.get("category"),
-                    "yes_price": market.get("yes_price", 50),
-                    "no_price": market.get("no_price", 50),
-                    "volume_24h": market.get("volume", 0)
-                })
-        
-        # Broadcast updates
-        if market_updates:
-            await broadcast({
-                "type": "upsert",
-                "markets": market_updates,
-                "ts": datetime.now(timezone.utc).isoformat()
-            })
-            
-        print(f"✅ Updated {len(market_updates)} markets")
-        
-    except Exception as e:
-        print(f"❌ Error fetching markets: {e}")
-        import traceback
-        traceback.print_exc()
-        return await fetch_mock_data()
+# ---------- Schemas ----------
+class MarketOut(BaseModel):
+    ticker: str
+    title: str
+    category: Optional[str] = None
+    last_update: Optional[datetime] = None
+    yes_price: Optional[int] = 0
+    no_price: Optional[int] = 0
+    volume_24h: Optional[int] = 0
 
-async def fetch_mock_data():
-    """Fallback mock data when Kalshi unavailable"""
-    import random
-    mock_markets = [
-        {"ticker": "RATE-CUT-DEC", "title": "Fed cuts rates in December?", 
-         "category": "Fed", "yes_price": random.randint(30,70), 
-         "no_price": 100-random.randint(30,70), "volume_24h": random.randint(1000,5000)}
-    ]
-    await broadcast({"type": "upsert", "markets": mock_markets, 
-                    "ts": datetime.now(timezone.utc).isoformat()})
+class MortgageHedgeRequest(BaseModel):
+    principal: float
+    current_rate: float
+    years_remaining: int
+    target_rate: float
+    total_hedge_amount: Optional[float] = None
+    allocations: Optional[Dict[str, float]] = None
 
 # ---------- Routes ----------
 @app.get("/health")
-async def health():
-    return {
-        "ok": True,
-        "time": datetime.now(timezone.utc).isoformat(),
-        "database": db is not None,
-        "kalshi": kalshi_client is not None
-    }
+def health():
+    return {"ok": True, "time": datetime.now(timezone.utc).isoformat()}
 
-@app.get("/markets")
-async def get_markets():
-    """Get all cached markets from database"""
-    if not db:
-        return []
+@app.get("/markets", response_model=List[MarketOut])
+def get_markets():
+    with SessionLocal() as s:
+        subq = (
+            select(Quote.ticker, func.max(Quote.ts).label("max_ts"))
+            .group_by(Quote.ticker)
+            .subquery()
+        )
+        q = (
+            select(
+                Market.ticker, Market.title, Market.category, Market.last_update,
+                Quote.yes_last, Quote.no_last,
+                Quote.volume
+            )
+            .join(subq, subq.c.ticker == Market.ticker, isouter=True)
+            .join(Quote, (Quote.ticker == subq.c.ticker) & (Quote.ts == subq.c.max_ts), isouter=True)
+            .order_by(Market.ticker)
+        )
+        rows = s.execute(q).all()
+        out = []
+        for row in rows:
+            ticker, title, category, last_update, yes_last, no_last, volume = row
+            out.append(
+                MarketOut(
+                    ticker=ticker, title=title, category=category, last_update=last_update,
+                    yes_price=yes_last or 0, no_price=no_last or 0, volume_24h=volume or 0
+                ).model_dump()
+            )
+        return out
+
+@app.get("/fed-markets")
+def get_fed_markets():
+    """
+    Get Fed rate cut markets for hedging calculations.
+    Filters for KXRATECUTCOUNT series and ensures good liquidity.
+    """
+    with SessionLocal() as s:
+        # Get latest quotes for KXRATECUTCOUNT markets
+        subq = (
+            select(Quote.ticker, func.max(Quote.ts).label("max_ts"))
+            .group_by(Quote.ticker)
+            .subquery()
+        )
+        
+        # Query for Fed rate cut markets with liquidity data
+        q = (
+            select(
+                Market.ticker, 
+                Market.title, 
+                Market.category, 
+                Market.last_update,
+                Quote.yes_last, 
+                Quote.no_last, 
+                Quote.volume,
+                Quote.yes_bid, 
+                Quote.yes_ask, 
+                Quote.no_bid, 
+                Quote.no_ask
+            )
+            .join(subq, subq.c.ticker == Market.ticker, isouter=True)
+            .join(Quote, (Quote.ticker == subq.c.ticker) & (Quote.ts == subq.c.max_ts), isouter=True)
+            .where(Market.ticker.like('KXRATECUTCOUNT%'))
+            .order_by(Quote.volume.desc().nullslast())
+        )
+        rows = s.execute(q).all()
+        
+        # Process and filter markets
+        MIN_VOLUME = 100  # Minimum volume for liquidity
+        fed_markets = []
+        
+        for row in rows:
+            ticker, title, category, last_update, yes_last, no_last, volume, yes_bid, yes_ask, no_bid, no_ask = row
+            
+            # Skip if no volume data
+            if not volume or volume < MIN_VOLUME:
+                continue
+            
+            # Extract number of cuts from ticker
+            cuts = 0
+            if '-' in ticker:
+                try:
+                    parts = ticker.split('-')
+                    if len(parts) >= 2:
+                        cuts = int(parts[-1])
+                except:
+                    cuts = 0
+            
+            # Calculate spread for liquidity assessment
+            spread = 0
+            if yes_bid and yes_ask:
+                spread = yes_ask - yes_bid
+            elif no_bid and no_ask:
+                spread = no_ask - no_bid
+            
+            # Calculate liquidity score (0-100)
+            volume_score = min(50, (volume / 1000) * 25)  # Up to 50 points for volume
+            spread_score = max(0, 50 - spread * 2)  # Up to 50 points for tight spread
+            liquidity_score = volume_score + spread_score
+            
+            fed_markets.append({
+                "ticker": ticker,
+                "title": title or f"Fed cuts rates {cuts} time{'s' if cuts != 1 else ''} by Dec 2025",
+                "cuts": cuts,
+                "yes_price": yes_last or 50,
+                "no_price": no_last or 50,
+                "yes_bid": yes_bid or (yes_last - 1 if yes_last else 49),
+                "yes_ask": yes_ask or (yes_last + 1 if yes_last else 51),
+                "no_bid": no_bid or (no_last - 1 if no_last else 49),
+                "no_ask": no_ask or (no_last + 1 if no_last else 51),
+                "volume": volume,
+                "spread": spread,
+                "liquidity_score": round(liquidity_score, 1)
+            })
+        
+        # Sort by liquidity score (best liquidity first)
+        fed_markets.sort(key=lambda x: x['liquidity_score'], reverse=True)
+        
+        # Return top 10 most liquid markets
+        return {
+            "markets": fed_markets[:10],
+            "count": len(fed_markets[:10]),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+@app.post("/calculate-hedge")
+def calculate_hedge(request: MortgageHedgeRequest):
+    """
+    Calculate potential savings from hedging strategy.
+    This endpoint processes mortgage details and returns hedge recommendations.
+    """
+    # Calculate monthly payment savings
+    months = request.years_remaining * 12
+    monthly_rate_current = request.current_rate / 100 / 12
+    monthly_rate_target = request.target_rate / 100 / 12
     
-    markets = await db.get_cached_markets(status="open", limit=100)
+    # Current monthly payment
+    if monthly_rate_current > 0:
+        current_payment = request.principal * (
+            monthly_rate_current * (1 + monthly_rate_current) ** months
+        ) / ((1 + monthly_rate_current) ** months - 1)
+    else:
+        current_payment = request.principal / months
     
-    # Format for frontend
-    formatted = []
-    for market in markets:
-        formatted.append({
-            "ticker": market.get("ticker"),
-            "title": market.get("title"),
-            "category": market.get("category"),
-            "yes_price": market.get("yes_price", 0),
-            "no_price": market.get("no_price", 0),
-            "yes_bid": market.get("yes_bid", 0),
-            "yes_ask": market.get("yes_ask", 0),
-            "no_bid": market.get("no_bid", 0),
-            "no_ask": market.get("no_ask", 0),
-            "volume_24h": market.get("volume", 0),
-            "last_update": market.get("last_updated")
-        })
+    # Target monthly payment
+    if monthly_rate_target > 0:
+        target_payment = request.principal * (
+            monthly_rate_target * (1 + monthly_rate_target) ** months
+        ) / ((1 + monthly_rate_target) ** months - 1)
+    else:
+        target_payment = request.principal / months
     
-    return formatted
+    # Calculate savings
+    monthly_savings = current_payment - target_payment
+    yearly_savings = monthly_savings * 12
+    total_savings = monthly_savings * months
+    
+    # Calculate rate cuts needed (assuming 25bps per cut affects mortgage rates by ~20bps)
+    bps_difference = (request.current_rate - request.target_rate) * 100
+    cuts_needed = int(bps_difference / 20)  # Rough estimate
+    
+    # Default hedge amount if not provided
+    if not request.total_hedge_amount:
+        request.total_hedge_amount = yearly_savings  # Hedge 1 year of savings
+    
+    return {
+        "current_payment": round(current_payment, 2),
+        "target_payment": round(target_payment, 2),
+        "monthly_savings": round(monthly_savings, 2),
+        "yearly_savings": round(yearly_savings, 2),
+        "total_savings": round(total_savings, 2),
+        "cuts_needed": cuts_needed,
+        "recommended_hedge": round(request.total_hedge_amount, 2),
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
 
 @app.get("/markets/{ticker}")
-async def get_market_detail(ticker: str):
-    """Get detailed market data including historical trades"""
-    if not db:
-        return JSONResponse({"error": "Database not available"}, status_code=503)
-    
-    market = await db.get_market_by_ticker(ticker)
-    if not market:
-        return JSONResponse({"error": "Market not found"}, status_code=404)
-    
-    trades = await db.get_cached_trades(ticker, limit=500)
-    
-    # Calculate volume velocity if analyzer available
-    velocity = None
-    if db and kalshi_client:
-        analyzer = MarketAnalyzer(db, kalshi_client)
-        velocity = await analyzer.calculate_volume_velocity(ticker)
-    
-    return {
-        "ticker": ticker,
-        "title": market.get("title"),
-        "category": market.get("category"),
-        "series": trades,
-        "velocity": velocity
-    }
-
-# ---------- Background Tasks ----------
-async def pull_loop():
-    """Main data fetching loop"""
-    while True:
-        await fetch_and_store_markets()
-        await asyncio.sleep(PULL_INTERVAL_SECONDS)
-
-async def cleanup_loop():
-    """Cleanup old data periodically"""
-    while True:
-        if db:
-            await db.clear_old_data(days=7)
-        await asyncio.sleep(3600 * 24)  # Run daily
-
-# ---------- Startup/Shutdown ----------
-@app.on_event("startup")
-async def startup():
-    global db, kalshi_client
-    
-    # Initialize database
-    if DATABASE_URL:
-        try:
-            db = Database(DATABASE_URL)
-            await db.initialize()
-            print("✅ Database connected")
-        except Exception as e:
-            print(f"❌ Database connection failed: {e}")
-    
-    # Initialize Kalshi client
-    if KALSHI_API_KEY and KALSHI_PRIVATE_KEY:
-        try:
-            kalshi_client = KalshiClient(KALSHI_API_KEY, KALSHI_PRIVATE_KEY)
-            print("✅ Kalshi client initialized")
-        except Exception as e:
-            print(f"❌ Kalshi client failed: {e}")
-    else:
-        print("⚠️ No Kalshi credentials - using mock mode")
-    
-    # Start background tasks
-    asyncio.create_task(pull_loop())
-    asyncio.create_task(cleanup_loop())
-    
-    # Initial data fetch
-    await fetch_and_store_markets()
-
-@app.on_event("shutdown")
-async def shutdown():
-    if db:
-        await db.close()
-    if kalshi_client:
-        kalshi_client.close()
-
-# --------- Testing ----------
-@app.get("/debug/kalshi-test")
-async def debug_kalshi():
-    """Test Kalshi API directly"""
-    if not kalshi_client:
-        return {"error": "No Kalshi client configured"}
-    
-    try:
-        # Get first few markets
-        markets = await kalshi_client.get_markets(status="open", limit=5)
-        
-        if not markets:
-            return {"error": "No markets returned"}
-        
-        # Test orderbook for first market
-        ticker = markets[0].get("ticker")
-        
-        # Get raw response
-        response = await kalshi_client._request("GET", f"/markets/{ticker}/orderbook", params={"depth": 5})
-        
+def get_market_detail(ticker: str):
+    with SessionLocal() as s:
+        m = s.get(Market, ticker)
+        if not m:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        q = (
+            select(Quote.ts, Quote.yes_last, Quote.no_last, Quote.volume)
+            .where(Quote.ticker == ticker)
+            .order_by(Quote.ts.desc())
+            .limit(500)
+        )
+        rows = s.execute(q).all()
         return {
             "ticker": ticker,
-            "raw_orderbook_response": response,
-            "market_count": len(markets),
-            "sample_market": markets[0]
+            "title": m.title,
+            "category": m.category,
+            "series": [{"ts": ts.isoformat(), "yes": y or 0, "no": n or 0, "vol": v or 0} for ts, y, n, v in rows[::-1]]
         }
-        
-    except Exception as e:
-        import traceback
-        return {
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }
-    
-@app.get("/disputes")
-async def get_disputes():
-    """Get historical dispute data for analysis"""
-    # For testing, return mock data
-    # Later, query historical settled markets from database
-    
-    disputes = []
-    
-    # Check if we have historical data in database
-    if db:
-        # Query for markets that settled early or had disputes
-        # This would require tracking settlement patterns
-        pass
-    
-    # Return test data for now
-    return {
-        "disputes": [
-            {
-                "ticker": "TENNIS-CINCY-AUG2025",
-                "title": "Medvedev vs. Alcaraz - Cincinnati Open Final",
-                "date": "2025-08-18",
-                "status": "early_settlement",
-                "reason": "Player withdrawal - injury",
-                "settlement_price": 100,
-                "volume_at_settlement": 45000,
-                "abnormal_pattern": True,
-                "description": "Market settled early due to Medvedev withdrawal with ankle injury"
-            },
-            {
-                "ticker": "NBA-FINALS-GAME5",
-                "title": "Lakers vs Celtics Game 5",
-                "date": "2025-06-12",
-                "status": "normal",
-                "reason": "Game completed normally",
-                "settlement_price": 0,
-                "volume_at_settlement": 120000,
-                "abnormal_pattern": False,
-                "description": "Normal market settlement after game completion"
-            }
-        ]
-    }
 
-@app.get("/disputes/{ticker}/analysis")
-async def analyze_dispute(ticker: str):
-    """Analyze trading patterns for a disputed market"""
-    # This would pull historical trade data and analyze patterns
-    # For now, return mock analysis
-    
-    return {
-        "ticker": ticker,
-        "pattern_analysis": {
-            "volume_spikes": [
-                {"time": "T-2h", "volume": 15000, "unusual": True},
-                {"time": "T-30m", "volume": 8000, "unusual": False}
-            ],
-            "price_movements": [
-                {"time": "T-3h", "price": 45, "expected": 50},
-                {"time": "T-1h", "price": 85, "expected": 52}
-            ],
-            "anomaly_score": 8.5,  # 0-10 scale
-            "confidence": 0.87
-        }
-    }
+# ---------- Background puller with Fed markets simulation ----------
+import random
+
+def _seed_if_empty():
+    with SessionLocal() as s:
+        # Add regular markets
+        if s.get(Market, "RATE-CUT-DEC") is None:
+            s.add(Market(ticker="RATE-CUT-DEC", title="Fed cuts rates in December?", category="Fed", last_update=datetime.now(timezone.utc)))
+            s.commit()
+        
+        # Add KXRATECUTCOUNT series markets
+        for cuts in range(0, 8):
+            ticker = f"KXRATECUTCOUNT-{cuts}"
+            if s.get(Market, ticker) is None:
+                title = f"Fed cuts rates {cuts} time{'s' if cuts != 1 else ''} by Dec 2025"
+                s.add(Market(
+                    ticker=ticker, 
+                    title=title, 
+                    category="Fed Rate Cuts", 
+                    last_update=datetime.now(timezone.utc)
+                ))
+        s.commit()
+
+def pull_once():
+    """Simulate market data updates including Fed markets"""
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as s:
+        for m in s.query(Market).all():
+            # Different pricing logic for Fed cut markets
+            if m.ticker.startswith("KXRATECUTCOUNT"):
+                try:
+                    cuts = int(m.ticker.split('-')[-1])
+                    # Price based on number of cuts (fewer cuts = higher NO price)
+                    base_yes = max(10, 70 - (cuts * 10))  # More cuts = lower probability
+                    yes_price = base_yes + random.randint(-5, 5)
+                    yes_price = max(5, min(95, yes_price))
+                    no_price = 100 - yes_price
+                    
+                    # Higher volume for more likely scenarios (1-3 cuts)
+                    if 1 <= cuts <= 3:
+                        vol = random.randint(500, 5000)
+                    else:
+                        vol = random.randint(100, 1000)
+                    
+                    # Tighter spreads for higher volume markets
+                    spread = 1 if vol > 2000 else 2 if vol > 500 else 3
+                    
+                    s.add(Quote(
+                        ticker=m.ticker, 
+                        ts=now, 
+                        yes_last=yes_price, 
+                        no_last=no_price,
+                        yes_bid=yes_price - spread,
+                        yes_ask=yes_price + spread,
+                        no_bid=no_price - spread,
+                        no_ask=no_price + spread,
+                        volume=vol
+                    ))
+                except:
+                    pass
+            else:
+                # Regular market simulation
+                y = random.randint(30, 70)
+                n = 100 - y
+                vol = random.randint(0, 5000)
+                s.add(Quote(ticker=m.ticker, ts=now, yes_last=y, no_last=n, volume=vol))
+            
+            m.last_update = now
+        s.commit()
+
+async def pull_loop():
+    while True:
+        pull_once()
+        # Broadcast updates
+        with SessionLocal() as s:
+            out = []
+            for m in s.query(Market).all():
+                latest = s.execute(
+                    select(Quote).where(Quote.ticker == m.ticker).order_by(Quote.ts.desc()).limit(1)
+                ).scalars().first()
+                if latest:
+                    out.append({
+                        "ticker": m.ticker,
+                        "yes_price": latest.yes_last,
+                        "no_price": latest.no_last,
+                        "volume_24h": latest.volume
+                    })
+        await broadcast({"type": "upsert", "markets": out, "ts": datetime.now(timezone.utc).isoformat()})
+        await asyncio.sleep(PULL_INTERVAL_SECONDS)
+
+# ---------- Lifespan ----------
+@app.on_event("startup")
+async def on_startup():
+    init_db()
+    _seed_if_empty()
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(pull_once, "interval", seconds=PULL_INTERVAL_SECONDS)
+    scheduler.start()
+    asyncio.create_task(pull_loop())
