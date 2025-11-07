@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kalshi Market Tools</title>
+  <title>Kalshi Market Tools - Hedge Anything</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
 
@@ -26,10 +26,8 @@
     .market-card:hover { box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     .skeleton { background: linear-gradient(90deg, #111827 25%, #1f2937 50%, #111827 75%); background-size: 1000px 100%; animation: loading 2s infinite; }
     @keyframes loading { 0% { background-position: -1000px 0; } 100% { background-position: 1000px 0; } }
-    .kalshi-link { color: #3b82f6; text-decoration: none; }
-    .kalshi-link:hover { text-decoration: underline; }
-    .dispute-indicator { animation: pulse 2s infinite; }
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    .hedge-card { transition: all 0.3s ease; }
+    .hedge-card:hover { transform: translateY(-4px); box-shadow: 0 8px 16px rgba(0,0,0,0.1); }
   </style>
 </head>
 <body class="bg-gray-50 text-gray-900">
@@ -41,16 +39,13 @@
     const { LineChart, Line, BarChart, Bar, ComposedChart, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } = RechartsLib;
 
     // --- CONFIG ---
+    // Change this to your Railway URL, or append ?api=https://your-app.up.railway.app
     const params = new URLSearchParams(location.search);
     const API_BASE = params.get('api') || "https://kalshi-market-tools-production.up.railway.app";
-    const KALSHI_BASE = "https://kalshi.com/markets";
 
     // --- UTIL ---
     const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
     const fallback = (v, d) => (v === undefined || v === null ? d : v);
-    
-    // Generate Kalshi market URL
-    const getKalshiUrl = (ticker) => `${KALSHI_BASE}/${ticker}`;
 
     // --- SIMPLE FALLBACK CHART ---
     const SimpleChart = ({ data, title }) => {
@@ -75,13 +70,12 @@
     };
 
     // --- LIVE DATA STORE ---
-    
-    // --- LIVE DATA STORE ---
     function useLiveMarkets(){
       const [markets, setMarkets] = useState([]);
-      const [status, setStatus] = useState('connecting');
+      const [status, setStatus] = useState('connecting'); // connecting | live | disconnected
       const [error, setError] = useState(null);
 
+      // initial fetch
       useEffect(()=>{
         fetch(`${API_BASE}/markets`)
           .then(async r => {
@@ -92,6 +86,7 @@
           .catch(e => setError(String(e)));
       }, []);
 
+      // SSE updates
       useEffect(()=>{
         const es = new EventSource(`${API_BASE}/stream`);
         es.onopen = () => setStatus('live');
@@ -146,31 +141,19 @@
     function MarketHeader({ market }) {
       if (!market) return null;
       const yes_price = fallback(market.yes_price, 0);
-      const no_price = fallback(market.no_price, 0);
+      const no_price  = fallback(market.no_price,  0);
+      // derive soft bids/asks if backend doesn't provide them
       const yes_bid = fallback(market.yes_bid, Math.max(0, yes_price - 1));
       const yes_ask = fallback(market.yes_ask, Math.min(100, yes_price + 1));
-      const no_bid = fallback(market.no_bid, Math.max(0, no_price - 1));
-      const no_ask = fallback(market.no_ask, Math.min(100, no_price + 1));
+      const no_bid  = fallback(market.no_bid,  Math.max(0, no_price  - 1));
+      const no_ask  = fallback(market.no_ask,  Math.min(100, no_price + 1));
       const spreadPct = yes_price ? ((yes_ask - yes_bid) / yes_price * 100) : 0;
 
       return (
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <div className="mb-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-500 font-mono">{market.ticker}</p>
-                <h2 className="text-2xl font-bold">{market.title || market.ticker}</h2>
-              </div>
-              <a href={getKalshiUrl(market.ticker)} 
-                 target="_blank" 
-                 rel="noopener noreferrer"
-                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center gap-2">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                </svg>
-                Trade on Kalshi
-              </a>
-            </div>
+            <p className="text-sm text-gray-500 font-mono">{market.ticker}</p>
+            <h2 className="text-2xl font-bold">{market.title || market.ticker}</h2>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div>
@@ -192,6 +175,291 @@
               <p className="text-xl font-semibold">{spreadPct.toFixed(1)}%</p>
             </div>
           </div>
+        </div>
+      );
+    }
+
+    // --- HEDGE ANYTHING COMPONENT ---
+    function HedgeAnything({ markets }) {
+      const [hedgeType, setHedgeType] = useState('mortgage');
+      const [userProfile, setUserProfile] = useState({
+        mortgage: {
+          principal: 400000,
+          rate: 7.0,
+          yearsRemaining: 25,
+          desiredRate: 5.5
+        }
+      });
+
+      // Calculate mortgage hedging strategy
+      const mortgageHedge = useMemo(() => {
+        const { principal, rate, yearsRemaining, desiredRate } = userProfile.mortgage;
+        const monthlyPayments = yearsRemaining * 12;
+        
+        // Calculate current monthly payment
+        const monthlyRate = rate / 100 / 12;
+        const currentMonthly = principal * (monthlyRate * Math.pow(1 + monthlyRate, monthlyPayments)) / 
+                              (Math.pow(1 + monthlyRate, monthlyPayments) - 1);
+        
+        // Calculate potential monthly payment at desired rate
+        const desiredMonthlyRate = desiredRate / 100 / 12;
+        const desiredMonthly = principal * (desiredMonthlyRate * Math.pow(1 + desiredMonthlyRate, monthlyPayments)) / 
+                              (Math.pow(1 + desiredMonthlyRate, monthlyPayments) - 1);
+        
+        // Calculate total savings if rates drop
+        const monthlySavings = currentMonthly - desiredMonthly;
+        const totalSavings = monthlySavings * monthlyPayments;
+        
+        // Assume each 25bps rate cut reduces mortgage rates by ~20bps
+        const bpsDifference = (rate - desiredRate) * 100; // Convert to basis points
+        const requiredCuts = Math.ceil(bpsDifference / 20); // How many 25bp cuts needed
+        
+        return {
+          currentMonthly: currentMonthly.toFixed(2),
+          desiredMonthly: desiredMonthly.toFixed(2),
+          monthlySavings: monthlySavings.toFixed(2),
+          totalSavings: totalSavings.toFixed(0),
+          requiredCuts,
+          bpsDifference: bpsDifference.toFixed(0)
+        };
+      }, [userProfile.mortgage]);
+
+      // Find relevant Fed rate markets
+      const fedMarkets = useMemo(() => {
+        if (!markets || markets.length === 0) return [];
+        
+        // Filter for Fed/rate related markets
+        const relevantMarkets = markets.filter(m => {
+          const title = (m.title || m.ticker || '').toLowerCase();
+          const ticker = (m.ticker || '').toLowerCase();
+          return title.includes('fed') || title.includes('rate') || 
+                 ticker.includes('fed') || ticker.includes('rate') ||
+                 title.includes('fomc') || ticker.includes('fomc') ||
+                 title.includes('interest') || ticker.includes('interest');
+        });
+        
+        return relevantMarkets.slice(0, 5);
+      }, [markets]);
+
+      // Calculate hedge amounts
+      const hedgeCalculations = useMemo(() => {
+        return fedMarkets.map(market => {
+          const noPrice = fallback(market.no_price, 50);
+          
+          // If rates don't drop, you want to recover some of your lost savings
+          // Betting on NO (rates don't drop) at current price
+          // If you bet $X at NO price of Y cents, you get $X * (100/Y) if NO wins
+          
+          // Let's hedge 1 year of potential savings
+          const yearlyLostSavings = mortgageHedge.monthlySavings * 12;
+          
+          // Calculate how much to bet to recover yearly savings if NO wins
+          const hedgeAmount = (yearlyLostSavings * noPrice) / 100;
+          const potentialPayout = hedgeAmount * (100 / noPrice);
+          const netProfit = potentialPayout - hedgeAmount;
+          
+          return {
+            market,
+            hedgeAmount: hedgeAmount.toFixed(2),
+            potentialPayout: potentialPayout.toFixed(2),
+            netProfit: netProfit.toFixed(2),
+            returnMultiple: (100 / noPrice).toFixed(2)
+          };
+        });
+      }, [fedMarkets, mortgageHedge]);
+
+      return (
+        <div>
+          {/* Header Section */}
+          <div className="bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg p-8 mb-6">
+            <h2 className="text-3xl font-bold mb-4">Hedge Anything</h2>
+            <p className="text-lg mb-4 text-purple-100">
+              Turn life's uncertainties into opportunities. Use prediction markets to protect against financial risks.
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+              <button onClick={() => setHedgeType('mortgage')} 
+                      className={`p-3 rounded-lg font-medium transition ${hedgeType==='mortgage' ? 'bg-white text-purple-600' : 'bg-purple-500/20 hover:bg-purple-500/30'}`}>
+                🏠 Mortgage Rates
+              </button>
+              <button className="p-3 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 font-medium opacity-50 cursor-not-allowed">
+                ☁️ Weather (Coming Soon)
+              </button>
+              <button className="p-3 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 font-medium opacity-50 cursor-not-allowed">
+                🏆 Sports (Coming Soon)
+              </button>
+              <button className="p-3 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 font-medium opacity-50 cursor-not-allowed">
+                🛒 Inflation (Coming Soon)
+              </button>
+            </div>
+          </div>
+
+          {hedgeType === 'mortgage' && (
+            <>
+              {/* Mortgage Input Form */}
+              <div className="bg-white rounded-lg shadow p-6 mb-6">
+                <h3 className="text-xl font-bold mb-4">Your Mortgage Details</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Remaining Principal Balance
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
+                      <input 
+                        type="number" 
+                        value={userProfile.mortgage.principal}
+                        onChange={e => setUserProfile(prev => ({
+                          ...prev, 
+                          mortgage: {...prev.mortgage, principal: parseInt(e.target.value) || 0}
+                        }))}
+                        className="w-full pl-8 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Current Interest Rate (%)
+                    </label>
+                    <input 
+                      type="number" 
+                      step="0.1"
+                      value={userProfile.mortgage.rate}
+                      onChange={e => setUserProfile(prev => ({
+                        ...prev, 
+                        mortgage: {...prev.mortgage, rate: parseFloat(e.target.value) || 0}
+                      }))}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Years Remaining
+                    </label>
+                    <input 
+                      type="number" 
+                      value={userProfile.mortgage.yearsRemaining}
+                      onChange={e => setUserProfile(prev => ({
+                        ...prev, 
+                        mortgage: {...prev.mortgage, yearsRemaining: parseInt(e.target.value) || 0}
+                      }))}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Target Refinance Rate (%)
+                    </label>
+                    <input 
+                      type="number" 
+                      step="0.1"
+                      value={userProfile.mortgage.desiredRate}
+                      onChange={e => setUserProfile(prev => ({
+                        ...prev, 
+                        mortgage: {...prev.mortgage, desiredRate: parseFloat(e.target.value) || 0}
+                      }))}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Analysis Results */}
+              <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-6 mb-6">
+                <h3 className="text-xl font-bold mb-4 text-blue-900">Your Refinancing Analysis</h3>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="bg-white rounded-lg p-4">
+                    <p className="text-sm text-gray-600">Current Monthly</p>
+                    <p className="text-2xl font-bold">${mortgageHedge.currentMonthly}</p>
+                  </div>
+                  <div className="bg-white rounded-lg p-4">
+                    <p className="text-sm text-gray-600">Target Monthly</p>
+                    <p className="text-2xl font-bold text-green-600">${mortgageHedge.desiredMonthly}</p>
+                  </div>
+                  <div className="bg-white rounded-lg p-4">
+                    <p className="text-sm text-gray-600">Monthly Savings</p>
+                    <p className="text-2xl font-bold text-blue-600">${mortgageHedge.monthlySavings}</p>
+                  </div>
+                  <div className="bg-white rounded-lg p-4">
+                    <p className="text-sm text-gray-600">Lifetime Savings</p>
+                    <p className="text-2xl font-bold text-purple-600">${parseInt(mortgageHedge.totalSavings).toLocaleString()}</p>
+                  </div>
+                </div>
+                <div className="mt-4 p-4 bg-yellow-50 rounded-lg">
+                  <p className="text-sm text-yellow-800">
+                    <strong>Analysis:</strong> You need approximately {mortgageHedge.requiredCuts} rate cuts of 25 basis points each 
+                    to reach your target refinancing rate. That's a total of {mortgageHedge.bpsDifference} basis points.
+                  </p>
+                </div>
+              </div>
+
+              {/* Hedging Recommendations */}
+              <div className="bg-white rounded-lg shadow p-6">
+                <h3 className="text-xl font-bold mb-4">📊 Recommended Hedging Markets</h3>
+                <p className="text-gray-600 mb-6">
+                  If rates don't drop as expected, these bets can help offset your lost savings opportunity. 
+                  We recommend hedging 1 year of potential savings to start.
+                </p>
+                
+                {hedgeCalculations.length > 0 ? (
+                  <div className="space-y-4">
+                    {hedgeCalculations.map((calc, idx) => (
+                      <div key={idx} className="hedge-card border rounded-lg p-4 hover:bg-gray-50">
+                        <div className="flex justify-between items-start mb-3">
+                          <div className="flex-1">
+                            <h4 className="font-semibold text-lg">{calc.market.title || calc.market.ticker}</h4>
+                            <p className="text-sm text-gray-500 font-mono">{calc.market.ticker}</p>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-sm text-gray-500">NO Price</span>
+                            <p className="text-xl font-bold text-red-600">{fallback(calc.market.no_price, 50)}¢</p>
+                          </div>
+                        </div>
+                        
+                        <div className="grid grid-cols-3 gap-4 p-3 bg-gray-50 rounded">
+                          <div>
+                            <p className="text-xs text-gray-600">Hedge Amount</p>
+                            <p className="font-bold text-blue-600">${calc.hedgeAmount}</p>
+                            <p className="text-xs text-gray-500">Bet on NO</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-600">If Rates Don't Drop</p>
+                            <p className="font-bold text-green-600">${calc.potentialPayout}</p>
+                            <p className="text-xs text-gray-500">{calc.returnMultiple}x return</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-600">Net Profit</p>
+                            <p className="font-bold">${calc.netProfit}</p>
+                            <p className="text-xs text-gray-500">Offsets lost savings</p>
+                          </div>
+                        </div>
+                        
+                        <div className="mt-3 flex justify-between items-center">
+                          <span className="text-sm text-gray-600">
+                            Volume: {fallback(calc.market.volume_24h, 0).toLocaleString()}
+                          </span>
+                          <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+                            Place Hedge on Kalshi →
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-12 text-gray-500">
+                    <p className="text-xl mb-4">No Fed rate markets currently available</p>
+                    <p className="text-sm">Check back when FOMC meeting markets are active</p>
+                  </div>
+                )}
+                
+                <div className="mt-6 p-4 bg-gray-100 rounded-lg">
+                  <p className="text-xs text-gray-600">
+                    <strong>Disclaimer:</strong> This is not financial advice. Hedging strategies involve risk and may result in losses. 
+                    Mortgage rates are influenced by many factors beyond Fed policy. Please consult with a financial advisor.
+                  </p>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       );
     }
@@ -408,209 +676,9 @@
       );
     }
 
-    // --- TECHNICAL ANALYSIS SECTION ---
-    function TechnicalAnalysis({ market, markets }) {
-      const [subTab, setSubTab] = useState('impact');
-      
-      return (
-        <div>
-          <div className="bg-white rounded-lg shadow mb-4">
-            <div className="flex border-b">
-              <button onClick={()=>setSubTab('impact')} 
-                      className={`px-4 py-3 font-medium transition ${subTab==='impact'?'border-b-2 border-blue-500 text-blue-600':'text-gray-600'}`}>
-                Market Impact
-              </button>
-              <button onClick={()=>setSubTab('velocity')} 
-                      className={`px-4 py-3 font-medium transition ${subTab==='velocity'?'border-b-2 border-blue-500 text-blue-600':'text-gray-600'}`}>
-                Volume Velocity
-              </button>
-              <button onClick={()=>setSubTab('comparison')} 
-                      className={`px-4 py-3 font-medium transition ${subTab==='comparison'?'border-b-2 border-blue-500 text-blue-600':'text-gray-600'}`}>
-                Multi-Market
-              </button>
-            </div>
-          </div>
-          
-          {subTab === 'impact' && <ImpactCalculator market={market} />}
-          {subTab === 'velocity' && <VolumeVelocity market={market} />}
-          {subTab === 'comparison' && <Comparison markets={markets} />}
-        </div>
-      );
-    }
-
-    // --- MARKET DISPUTES TAB ---
-    function MarketDisputes() {
-      const [disputes, setDisputes] = useState([]);
-      const [loading, setLoading] = useState(true);
-      const [selectedDispute, setSelectedDispute] = useState(null);
-
-      useEffect(() => {
-        // Fetch historical dispute data
-        fetch(`${API_BASE}/disputes`)
-          .then(r => r.json())
-          .then(data => {
-            setDisputes(data.disputes || []);
-            setLoading(false);
-          })
-          .catch(e => {
-            console.error('Error fetching disputes:', e);
-            setLoading(false);
-            // Mock data for testing
-            setDisputes([
-              {
-                ticker: "TENNIS-CINCY-AUG2025",
-                title: "Medvedev vs. Alcaraz - Cincinnati Open Final",
-                date: "2025-08-18",
-                status: "early_settlement",
-                reason: "Player withdrawal - injury",
-                settlement_price: 100,
-                volume_at_settlement: 45000,
-                abnormal_pattern: true,
-                description: "Market settled early due to Medvedev withdrawal with ankle injury in second set"
-              }
-            ]);
-          });
-      }, []);
-
-      const DisputeCard = ({ dispute }) => (
-        <div className={`p-4 rounded-lg border-2 ${dispute.abnormal_pattern ? 'border-red-400 bg-red-50' : 'border-gray-200'}`}>
-          <div className="flex justify-between items-start mb-2">
-            <div>
-              <h4 className="font-semibold">{dispute.title}</h4>
-              <p className="text-sm text-gray-600 font-mono">{dispute.ticker}</p>
-            </div>
-            {dispute.abnormal_pattern && (
-              <span className="px-2 py-1 bg-red-600 text-white text-xs rounded-full dispute-indicator">
-                DISPUTED
-              </span>
-            )}
-          </div>
-          <div className="text-sm text-gray-700">
-            <p><strong>Date:</strong> {dispute.date}</p>
-            <p><strong>Reason:</strong> {dispute.reason}</p>
-            <p><strong>Settlement:</strong> {dispute.settlement_price}¢</p>
-            <p><strong>Volume:</strong> {dispute.volume_at_settlement?.toLocaleString()}</p>
-          </div>
-          {dispute.description && (
-            <p className="mt-2 text-xs text-gray-600 italic">{dispute.description}</p>
-          )}
-          <button onClick={() => setSelectedDispute(dispute)}
-                  className="mt-3 text-blue-600 hover:text-blue-700 text-sm font-medium">
-            View Analysis →
-          </button>
-        </div>
-      );
-
-      return (
-        <div>
-          <div className="bg-white rounded-lg shadow p-6 mb-6">
-            <h2 className="text-2xl font-bold mb-4">Market Disputes Analysis</h2>
-            <p className="text-gray-600 mb-6">
-              Analysis of sports markets that settled early due to player injuries, cancellations, or other unusual circumstances.
-            </p>
-            
-            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
-              <p className="text-sm font-semibold text-yellow-800">Testing Environment</p>
-              <p className="text-xs text-yellow-700">
-                This feature is in development. We're analyzing historical patterns from disputed markets to identify anomalies.
-              </p>
-            </div>
-
-            {loading ? (
-              <div className="text-center py-8">
-                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
-                <p className="mt-2 text-gray-600">Loading dispute data...</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {disputes.map((dispute, idx) => (
-                  <DisputeCard key={idx} dispute={dispute} />
-                ))}
-              </div>
-            )}
-
-            {selectedDispute && (
-              <div className="mt-8 p-6 bg-gray-50 rounded-lg">
-                <h3 className="text-lg font-semibold mb-4">Pattern Analysis: {selectedDispute.ticker}</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div>
-                    <h4 className="font-medium mb-2">Abnormal Market Behavior</h4>
-                    <ul className="text-sm text-gray-700 space-y-1">
-                      <li>• Sudden volume spike before announcement</li>
-                      <li>• Price movement inconsistent with public information</li>
-                      <li>• Unusual trading patterns detected</li>
-                    </ul>
-                  </div>
-                  <div>
-                    <h4 className="font-medium mb-2">Comparison to Normal Market</h4>
-                    <ul className="text-sm text-gray-700 space-y-1">
-                      <li>• Normal markets show gradual price discovery</li>
-                      <li>• Volume typically increases near event time</li>
-                      <li>• This market showed 3x normal volume 2 hours before</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
-
-    // --- PERSONAL MARKETS TAB ---
-    function PersonalMarkets() {
-      return (
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="text-center py-16">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-purple-100 rounded-full mb-4">
-              <svg className="w-8 h-8 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
-                      d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-              </svg>
-            </div>
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">Personal Markets</h2>
-            <p className="text-gray-600 mb-6">Create prediction markets with your friends</p>
-            
-            <div className="inline-flex items-center px-4 py-2 bg-purple-600 text-white rounded-full">
-              <svg className="w-5 h-5 mr-2 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Coming Soon
-            </div>
-            
-            <div className="mt-8 max-w-md mx-auto text-left">
-              <h3 className="font-semibold mb-2">Planned Features:</h3>
-              <ul className="text-sm text-gray-600 space-y-2">
-                <li className="flex items-start">
-                  <span className="text-purple-600 mr-2">•</span>
-                  Create custom markets for any event
-                </li>
-                <li className="flex items-start">
-                  <span className="text-purple-600 mr-2">•</span>
-                  Invite friends via link or social media
-                </li>
-                <li className="flex items-start">
-                  <span className="text-purple-600 mr-2">•</span>
-                  Set your own rules and settlement criteria
-                </li>
-                <li className="flex items-start">
-                  <span className="text-purple-600 mr-2">•</span>
-                  Track leaderboards and betting history
-                </li>
-                <li className="flex items-start">
-                  <span className="text-purple-600 mr-2">•</span>
-                  No real money required - use points or tokens
-                </li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    // --- MAIN APP ---
+    // --- APP ---
     function App(){
-      const [activeTab, setActiveTab] = useState('technical');
+      const [activeTab, setActiveTab] = useState('hedge');
       const { markets, status, error } = useLiveMarkets();
       const [selectedMarket, setSelectedMarket] = useState(null);
       const [searchQuery, setSearchQuery] = useState('');
@@ -639,7 +707,7 @@
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-3xl font-bold">Kalshi Market Tools</h1>
-                <p className="text-blue-100 mt-1">Advanced analytics for event contract trading</p>
+                <p className="text-blue-100 mt-1">Advanced analytics & hedging for event contract trading</p>
               </div>
               <span className={"px-3 py-1 rounded-full text-sm " + statusChip}>
                 {status === 'live' ? 'Live data' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}
@@ -648,25 +716,18 @@
           </header>
 
           <nav className="bg-white shadow-sm">
-            <div className="flex space-x-8 px-6">
-              <button onClick={()=>setActiveTab('technical')} 
-                      className={"py-4 px-2 font-medium transition " + (activeTab==='technical'?'tab-active':'text-gray-600')}>
-                Technical Analysis
-              </button>
-              <button onClick={()=>setActiveTab('disputes')} 
-                      className={"py-4 px-2 font-medium transition " + (activeTab==='disputes'?'tab-active':'text-gray-600')}>
-                Market Disputes
-              </button>
-              <button onClick={()=>setActiveTab('personal')} 
-                      className={"py-4 px-2 font-medium transition flex items-center gap-2 " + (activeTab==='personal'?'tab-active':'text-gray-600')}>
-                Personal Markets
-                <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Soon</span>
-              </button>
+            <div className="flex space-x-8 px-6 overflow-x-auto">
+              <button onClick={()=>setActiveTab('hedge')} className={"py-4 px-2 font-medium transition whitespace-nowrap " + (activeTab==='hedge'?'tab-active':'text-gray-600')}>🛡️ Hedge Anything</button>
+              <button onClick={()=>setActiveTab('impact')} className={"py-4 px-2 font-medium transition whitespace-nowrap " + (activeTab==='impact'?'tab-active':'text-gray-600')}>📊 Market Impact</button>
+              <button onClick={()=>setActiveTab('velocity')} className={"py-4 px-2 font-medium transition whitespace-nowrap " + (activeTab==='velocity'?'tab-active':'text-gray-600')}>🚀 Volume Velocity</button>
+              <button onClick={()=>setActiveTab('comparison')} className={"py-4 px-2 font-medium transition whitespace-nowrap " + (activeTab==='comparison'?'tab-active':'text-gray-600')}>🔄 Multi-Market</button>
             </div>
           </nav>
 
           <main className="container mx-auto px-6 py-6">
-            {activeTab === 'technical' && (
+            {activeTab === 'hedge' ? (
+              <HedgeAnything markets={markets} />
+            ) : (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <aside className="lg:sticky lg:top-4">
                   <div className="bg-white rounded-lg shadow p-4">
@@ -685,13 +746,12 @@
                 </aside>
 
                 <div className="lg:col-span-2">
-                  <TechnicalAnalysis market={selectedMarket} markets={filteredMarkets} />
+                  {activeTab === 'impact'    && <ImpactCalculator market={selectedMarket} />}
+                  {activeTab === 'velocity'  && <VolumeVelocity   market={selectedMarket} />}
+                  {activeTab === 'comparison'&& <Comparison      markets={filteredMarkets} />}
                 </div>
               </div>
             )}
-
-            {activeTab === 'disputes' && <MarketDisputes />}
-            {activeTab === 'personal' && <PersonalMarkets />}
           </main>
 
           <footer className="bg-gray-800 text-white mt-12 py-8">
@@ -699,15 +759,16 @@
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
                 <div>
                   <h4 className="font-semibold mb-3">Kalshi Market Tools</h4>
-                  <p className="text-gray-400 text-sm">Professional analytics for event contract trading. Not affiliated with Kalshi Inc.</p>
+                  <p className="text-gray-400 text-sm">Professional analytics & hedging strategies for event contract trading. Not affiliated with Kalshi Inc.</p>
                 </div>
                 <div>
                   <h4 className="font-semibold mb-3">Features</h4>
                   <ul className="text-gray-400 text-sm space-y-1">
-                    <li>• Technical analysis suite</li>
-                    <li>• Market dispute tracking</li>
-                    <li>• Historical pattern analysis</li>
-                    <li>• Personal markets (coming soon)</li>
+                    <li>• Hedge against life's uncertainties</li>
+                    <li>• Order impact calculator</li>
+                    <li>• Volume velocity tracking</li>
+                    <li>• News event correlation</li>
+                    <li>• Multi-market comparison</li>
                   </ul>
                 </div>
                 <div>
@@ -716,11 +777,11 @@
                     <span className={"inline-block w-2 h-2 rounded-full mr-2 " + (status==='live'?'bg-green-500':status==='connecting'?'bg-yellow-500':'bg-red-500')}></span>
                     {status==='live'?'Live Data':status==='connecting'?'Connecting…':'Disconnected'}
                   </p>
-                  <p className="text-gray-400 text-sm mt-2">Charts: {window.Recharts ? '📊 Advanced' : '📈 Basic'}</p>
+                  <p className="text-gray-400 text-sm mt-2">Charts: {window.Recharts ? '📊 Advanced Charts' : '📈 Basic Charts'}</p>
                 </div>
               </div>
               <div className="mt-8 pt-8 border-t border-gray-700 text-center text-sm text-gray-400">
-                <p>© 2025 Kalshi Market Tools • Data for demonstration purposes</p>
+                <p>© 2025 Kalshi Market Tools • For demonstration purposes • Not financial advice</p>
               </div>
             </div>
           </footer>
