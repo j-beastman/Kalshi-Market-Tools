@@ -85,7 +85,7 @@ class KalshiClient:
             logger.error(f"API request failed: {e}")
             raise
     
-    async def get_markets(self, status: str = "open", limit: int = 100) -> List[Dict]:
+    async def get_markets(self, params) -> List[Dict]:
         """
         Get list of markets
         
@@ -97,11 +97,6 @@ class KalshiClient:
             List of market dictionaries
         """
         try:
-            params = {
-                "status": status,
-                "limit": limit
-            }
-            
             response = await self._request("GET", "/markets", params=params)
             return response.get("markets", [])
             

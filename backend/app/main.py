@@ -65,17 +65,18 @@ async def fetch_and_store_markets():
     """Fetch markets from Kalshi and store in PostgreSQL"""
     try:
         if not kalshi_client:
-            print("⚠️ No Kalshi client - using mock data")
+            print("No Kalshi client - using mock data")
             return await fetch_mock_data()
         
         # Get open markets
-        markets = await kalshi_client.get_markets(status="open", limit=50)
+        markets = await kalshi_client.get_markets({"limit": 10, "mve_filter": "exclude"})
         
         # Filter out complex multi-game markets that might not have standard orderbooks
-        filtered_markets = [
-            m for m in markets 
-            if not m.get("ticker", "").startswith("KXMVENFLMULTIGAME")
-        ]
+        # filtered_markets = [
+        #     m for m in markets 
+        #     if not m.get("ticker", "").startswith("KXMVENFLMULTIGAME")
+        # ]
+        filtered_markets = markets
         
         print(f"📊 Processing {len(filtered_markets)} markets (filtered from {len(markets)})")
         
@@ -88,7 +89,7 @@ async def fetch_and_store_markets():
                 # Get orderbook for pricing
                 orderbook = await kalshi_client.get_orderbook(ticker, depth=5)
                 
-                # Calculate prices based on orderbook
+                # TODO: Change this such that it throws an error instead of outputting these values
                 yes_price = 50  # Default
                 no_price = 50
                 yes_bid = 0
