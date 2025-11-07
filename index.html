@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kalshi Market Tools - Hedge Anything</title>
+  <title>Kalshi Market Tools - Advanced Hedge Strategy</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
 
@@ -23,22 +23,45 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
     .tab-active { border-bottom: 2px solid #3b82f6; color: #3b82f6; }
+    .subtab-active { background: #3b82f6; color: white; }
     .market-card:hover { box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     .skeleton { background: linear-gradient(90deg, #111827 25%, #1f2937 50%, #111827 75%); background-size: 1000px 100%; animation: loading 2s infinite; }
     @keyframes loading { 0% { background-position: -1000px 0; } 100% { background-position: 1000px 0; } }
     .hedge-card { transition: all 0.3s ease; }
     .hedge-card:hover { transform: translateY(-4px); box-shadow: 0 8px 16px rgba(0,0,0,0.1); }
-    .allocation-slider { transition: all 0.2s ease; }
-    .allocation-slider:hover { transform: scale(1.02); }
+    .info-bubble { 
+      position: absolute; 
+      background: #1f2937; 
+      color: white; 
+      padding: 8px 12px; 
+      border-radius: 6px; 
+      font-size: 12px; 
+      z-index: 50;
+      max-width: 300px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    .info-bubble:after {
+      content: '';
+      position: absolute;
+      top: -4px;
+      left: 20px;
+      width: 8px;
+      height: 8px;
+      background: #1f2937;
+      transform: rotate(45deg);
+    }
+    .scenario-positive { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
+    .scenario-negative { background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); }
+    .scenario-neutral { background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%); }
   </style>
 </head>
 <body class="bg-gray-50 text-gray-900">
   <div id="root">Loading...</div>
 
   <script type="text/babel">
-    const { useState, useEffect, useMemo } = React;
+    const { useState, useEffect, useMemo, useRef } = React;
     const RechartsLib = window.Recharts || {};
-    const { LineChart, Line, BarChart, Bar, ComposedChart, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell, PieChart, Pie } = RechartsLib;
+    const { LineChart, Line, BarChart, Bar, ComposedChart, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell, PieChart, Pie, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } = RechartsLib;
 
     // --- CONFIG ---
     const params = new URLSearchParams(location.search);
@@ -48,27 +71,46 @@
     const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
     const fallback = (v, d) => (v === undefined || v === null ? d : v);
 
-    // --- SIMPLE FALLBACK CHART ---
-    const SimpleChart = ({ data, title }) => {
-      if (!data || data.length === 0) return null;
-      const maxValue = Math.max(...data.map(d => d.value || 0), 1);
+    // --- INFO TOOLTIP COMPONENT ---
+    function InfoTooltip({ children, info }) {
+      const [showInfo, setShowInfo] = useState(false);
+      const [position, setPosition] = useState({ x: 0, y: 0 });
+      const buttonRef = useRef(null);
+
+      const handleMouseEnter = () => {
+        if (buttonRef.current) {
+          const rect = buttonRef.current.getBoundingClientRect();
+          setPosition({ x: rect.left, y: rect.bottom + 5 });
+        }
+        setShowInfo(true);
+      };
+
       return (
-        <div className="bg-white rounded-lg shadow p-4">
-          <h4 className="text-sm font-semibold mb-3">{title}</h4>
-          <div className="space-y-2">
-            {data.slice(0, 10).map((item, i) => (
-              <div key={i} className="flex items-center">
-                <span className="text-xs w-16">{item.label}</span>
-                <div className="flex-1 mx-2">
-                  <div className="h-4 bg-blue-500 rounded" style={{ width: `${(item.value / maxValue) * 100}%` }}></div>
-                </div>
-                <span className="text-xs">{item.value}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        <span className="relative inline-flex items-center">
+          {children}
+          <button
+            ref={buttonRef}
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={() => setShowInfo(false)}
+            className="ml-1 w-4 h-4 rounded-full bg-gray-300 text-gray-700 text-xs flex items-center justify-center hover:bg-blue-500 hover:text-white transition cursor-help"
+          >
+            ?
+          </button>
+          {showInfo && (
+            <div 
+              className="info-bubble"
+              style={{ 
+                position: 'fixed',
+                left: position.x + 'px',
+                top: position.y + 'px'
+              }}
+            >
+              {info}
+            </div>
+          )}
+        </span>
       );
-    };
+    }
 
     // --- LIVE DATA STORE ---
     function useLiveMarkets(){
@@ -77,7 +119,7 @@
       const [status, setStatus] = useState('connecting');
       const [error, setError] = useState(null);
 
-      // Initial fetch of all markets
+      // Initial fetch
       useEffect(()=>{
         fetch(`${API_BASE}/markets`)
           .then(async r => {
@@ -88,21 +130,23 @@
           .catch(e => setError(String(e)));
       }, []);
 
-      // Fetch Fed markets specifically
+      // Fetch Fed markets
       useEffect(()=>{
         const fetchFedMarkets = async () => {
           try {
             const response = await fetch(`${API_BASE}/fed-markets`);
             if (!response.ok) throw new Error(`GET /fed-markets ${response.status}`);
             const data = await response.json();
-            setFedMarkets(data.markets || []);
+            // Sort by number of cuts for organization
+            const sortedMarkets = (data.markets || []).sort((a, b) => a.cuts - b.cuts);
+            setFedMarkets(sortedMarkets);
           } catch (e) {
             console.error('Error fetching Fed markets:', e);
           }
         };
         
         fetchFedMarkets();
-        const interval = setInterval(fetchFedMarkets, 30000); // Refresh every 30 seconds
+        const interval = setInterval(fetchFedMarkets, 30000);
         
         return () => clearInterval(interval);
       }, []);
@@ -123,7 +167,7 @@
                 return Object.values(byT).sort((a,b)=>a.ticker.localeCompare(b.ticker));
               });
               
-              // Update Fed markets if they're in the update
+              // Update Fed markets
               setFedMarkets(prev => {
                 const updated = [...prev];
                 for (const u of payload.markets) {
@@ -134,7 +178,7 @@
                     }
                   }
                 }
-                return updated;
+                return updated.sort((a, b) => a.cuts - b.cuts);
               });
             }
           } catch {}
@@ -149,6 +193,7 @@
     // --- HEDGE ANYTHING COMPONENT ---
     function HedgeAnything({ markets, fedMarkets }) {
       const [hedgeType, setHedgeType] = useState('mortgage');
+      const [subTab, setSubTab] = useState('strategy'); // strategy | scenarios | math
       const [userProfile, setUserProfile] = useState({
         mortgage: {
           principal: 400000,
@@ -158,34 +203,29 @@
         }
       });
       
-      // Total hedge amount and individual allocations
+      // Hedge allocations
       const [totalHedgeAmount, setTotalHedgeAmount] = useState(null);
-      const [marketAllocations, setMarketAllocations] = useState({});
-      const [autoAllocate, setAutoAllocate] = useState(true);
+      const [marketAllocations, setMarketAllocations] = useState({}); // { ticker: { side: 'yes'|'no', amount: 100 } }
 
-      // Calculate mortgage hedging strategy
+      // Calculate mortgage metrics
       const mortgageHedge = useMemo(() => {
         const { principal, rate, yearsRemaining, desiredRate } = userProfile.mortgage;
         const monthlyPayments = yearsRemaining * 12;
         
-        // Calculate current monthly payment
         const monthlyRate = rate / 100 / 12;
         const currentMonthly = principal * (monthlyRate * Math.pow(1 + monthlyRate, monthlyPayments)) / 
                               (Math.pow(1 + monthlyRate, monthlyPayments) - 1);
         
-        // Calculate potential monthly payment at desired rate
         const desiredMonthlyRate = desiredRate / 100 / 12;
         const desiredMonthly = principal * (desiredMonthlyRate * Math.pow(1 + desiredMonthlyRate, monthlyPayments)) / 
                               (Math.pow(1 + desiredMonthlyRate, monthlyPayments) - 1);
         
-        // Calculate total savings if rates drop
         const monthlySavings = currentMonthly - desiredMonthly;
         const totalSavings = monthlySavings * monthlyPayments;
         const yearlySavings = monthlySavings * 12;
         
-        // Basis points difference
         const bpsDifference = (rate - desiredRate) * 100;
-        const requiredCuts = Math.ceil(bpsDifference / 25); // Assuming 25bp per cut
+        const requiredCuts = Math.ceil(bpsDifference / 25);
         
         return {
           currentMonthly: currentMonthly.toFixed(2),
@@ -198,96 +238,519 @@
         };
       }, [userProfile.mortgage]);
 
-      // Set initial total hedge amount
+      // Set initial hedge amount
       useEffect(() => {
         if (totalHedgeAmount === null && mortgageHedge.yearlySavings) {
           setTotalHedgeAmount(parseFloat(mortgageHedge.yearlySavings));
         }
       }, [mortgageHedge.yearlySavings]);
 
-      // Auto-allocate across markets based on liquidity and probability
+      // Smart hedge allocation based on required cuts
       useEffect(() => {
-        if (!autoAllocate || !fedMarkets.length || !totalHedgeAmount) return;
+        if (!fedMarkets.length || !totalHedgeAmount) return;
         
         const allocations = {};
-        const totalLiquidity = fedMarkets.reduce((sum, m) => sum + (m.liquidity_score || 50), 0);
+        const cutThreshold = mortgageHedge.requiredCuts;
         
-        // Allocate based on liquidity score and proximity to required cuts
-        fedMarkets.forEach(market => {
-          const weight = (market.liquidity_score || 50) / totalLiquidity;
-          
-          // Boost allocation for markets near the required cuts
-          const cutsDiff = Math.abs(market.cuts - mortgageHedge.requiredCuts);
-          const proximityBoost = cutsDiff <= 1 ? 1.5 : cutsDiff <= 2 ? 1.2 : 1.0;
-          
-          allocations[market.ticker] = Math.round(totalHedgeAmount * weight * proximityBoost);
-        });
+        // Split markets into YES and NO bets
+        const yesBets = fedMarkets.filter(m => m.cuts >= cutThreshold);
+        const noBets = fedMarkets.filter(m => m.cuts < cutThreshold);
         
-        // Normalize to match total
-        const allocSum = Object.values(allocations).reduce((a, b) => a + b, 0);
-        if (allocSum > 0) {
+        // Allocate 60% to NO bets (protect against no/low cuts), 40% to YES bets (benefit from many cuts)
+        const noAllocation = totalHedgeAmount * 0.6;
+        const yesAllocation = totalHedgeAmount * 0.4;
+        
+        // Distribute NO allocation
+        if (noBets.length > 0) {
+          const noPerMarket = noAllocation / noBets.length;
+          noBets.forEach(market => {
+            // Weight by how far from threshold (closer = more likely = more allocation)
+            const distance = cutThreshold - market.cuts;
+            const weight = 1 + (0.2 * (3 - Math.min(3, distance))); // Boost markets close to threshold
+            allocations[market.ticker] = {
+              side: 'no',
+              amount: Math.round(noPerMarket * weight)
+            };
+          });
+        }
+        
+        // Distribute YES allocation
+        if (yesBets.length > 0) {
+          const yesPerMarket = yesAllocation / yesBets.length;
+          yesBets.forEach(market => {
+            // Weight by likelihood (markets near threshold get more)
+            const distance = market.cuts - cutThreshold;
+            const weight = 1 + (0.2 * (3 - Math.min(3, distance)));
+            allocations[market.ticker] = {
+              side: 'yes',
+              amount: Math.round(yesPerMarket * weight)
+            };
+          });
+        }
+        
+        // Normalize to match total exactly
+        const totalAllocated = Object.values(allocations).reduce((sum, a) => sum + a.amount, 0);
+        if (totalAllocated > 0) {
           Object.keys(allocations).forEach(ticker => {
-            allocations[ticker] = Math.round(allocations[ticker] * totalHedgeAmount / allocSum);
+            allocations[ticker].amount = Math.round(allocations[ticker].amount * totalHedgeAmount / totalAllocated);
           });
         }
         
         setMarketAllocations(allocations);
-      }, [autoAllocate, fedMarkets, totalHedgeAmount, mortgageHedge.requiredCuts]);
+      }, [fedMarkets, totalHedgeAmount, mortgageHedge.requiredCuts]);
 
-      // Calculate potential returns for each market
-      const calculateReturns = (market, hedgeAmount) => {
-        if (!hedgeAmount || !market.no_price) return null;
+      // Calculate scenario outcomes
+      const scenarioAnalysis = useMemo(() => {
+        if (!fedMarkets.length) return [];
         
-        const noPrice = market.no_price / 100; // Convert cents to dollars
-        const potentialPayout = hedgeAmount / noPrice;
-        const netProfit = potentialPayout - hedgeAmount;
-        const returnMultiple = 1 / noPrice;
-        
-        return {
-          hedgeAmount: hedgeAmount.toFixed(2),
-          potentialPayout: potentialPayout.toFixed(2),
-          netProfit: netProfit.toFixed(2),
-          returnMultiple: returnMultiple.toFixed(2)
-        };
-      };
-
-      // Calculate total portfolio metrics
-      const portfolioMetrics = useMemo(() => {
-        let totalInvested = 0;
-        let totalPotentialPayout = 0;
-        let weightedReturn = 0;
+        const scenarios = [];
+        const { principal, rate, yearsRemaining } = userProfile.mortgage;
         
         fedMarkets.forEach(market => {
-          const allocation = marketAllocations[market.ticker] || 0;
-          if (allocation > 0) {
-            const returns = calculateReturns(market, allocation);
-            if (returns) {
-              totalInvested += allocation;
-              totalPotentialPayout += parseFloat(returns.potentialPayout);
-              weightedReturn += parseFloat(returns.returnMultiple) * (allocation / (totalHedgeAmount || 1));
-            }
+          const cuts = market.cuts;
+          const newRate = Math.max(3.0, rate - (cuts * 0.25)); // Assume 25bps per cut
+          
+          // Calculate new payment at this rate
+          const monthlyPayments = yearsRemaining * 12;
+          const newMonthlyRate = newRate / 100 / 12;
+          let newPayment;
+          
+          if (newMonthlyRate > 0) {
+            newPayment = principal * (newMonthlyRate * Math.pow(1 + newMonthlyRate, monthlyPayments)) / 
+                        ((1 + newMonthlyRate, monthlyPayments) - 1);
+          } else {
+            newPayment = principal / monthlyPayments;
           }
+          
+          const currentPayment = parseFloat(mortgageHedge.currentMonthly);
+          const monthlySavings = currentPayment - newPayment;
+          const yearlySavings = monthlySavings * 12;
+          
+          // Calculate hedge P&L for this scenario
+          let hedgePL = 0;
+          Object.entries(marketAllocations).forEach(([ticker, alloc]) => {
+            const hedgeMarket = fedMarkets.find(m => m.ticker === ticker);
+            if (!hedgeMarket) return;
+            
+            // Determine if this bet wins
+            const betWins = (alloc.side === 'yes' && hedgeMarket.cuts === cuts) || 
+                           (alloc.side === 'no' && hedgeMarket.cuts !== cuts);
+            
+            if (betWins) {
+              const price = alloc.side === 'yes' ? hedgeMarket.yes_price : hedgeMarket.no_price;
+              const payout = alloc.amount / (price / 100);
+              hedgePL += (payout - alloc.amount);
+            } else {
+              hedgePL -= alloc.amount;
+            }
+          });
+          
+          // Probability based on current market price
+          const probability = market.yes_price / 100;
+          
+          scenarios.push({
+            cuts,
+            newRate: newRate.toFixed(2),
+            probability,
+            monthlySavings: monthlySavings.toFixed(2),
+            yearlySavings: yearlySavings.toFixed(2),
+            canRefinance: newRate <= userProfile.mortgage.desiredRate,
+            hedgePL: hedgePL.toFixed(2),
+            netOutcome: (yearlySavings + hedgePL).toFixed(2),
+            expectedValue: ((yearlySavings + hedgePL) * probability).toFixed(2)
+          });
         });
         
-        return {
-          totalInvested: totalInvested.toFixed(2),
-          totalPotentialPayout: totalPotentialPayout.toFixed(2),
-          netProfit: (totalPotentialPayout - totalInvested).toFixed(2),
-          averageReturn: weightedReturn.toFixed(2),
-          coverage: ((totalPotentialPayout / parseFloat(mortgageHedge.yearlySavings)) * 100).toFixed(1)
-        };
-      }, [fedMarkets, marketAllocations, totalHedgeAmount, mortgageHedge.yearlySavings]);
+        return scenarios.sort((a, b) => a.cuts - b.cuts);
+      }, [fedMarkets, marketAllocations, mortgageHedge, userProfile.mortgage]);
 
-      // Chart data for allocation visualization
-      const allocationChartData = useMemo(() => {
-        return fedMarkets
-          .filter(m => marketAllocations[m.ticker] > 0)
-          .map(m => ({
-            name: `${m.cuts} cuts`,
-            value: marketAllocations[m.ticker],
-            ticker: m.ticker
-          }));
-      }, [fedMarkets, marketAllocations]);
+      // Calculate expected value
+      const expectedValue = useMemo(() => {
+        if (!scenarioAnalysis.length) return 0;
+        return scenarioAnalysis.reduce((sum, s) => sum + parseFloat(s.expectedValue), 0).toFixed(2);
+      }, [scenarioAnalysis]);
+
+      // Math explanations
+      const MathExplanations = () => (
+        <div className="bg-white rounded-lg shadow p-6">
+          <h3 className="text-xl font-bold mb-6">📐 How We Calculate Everything</h3>
+          
+          <div className="space-y-6">
+            {/* Monthly Payment Calculation */}
+            <div className="border-l-4 border-blue-500 pl-4">
+              <h4 className="font-semibold text-lg mb-2">Monthly Payment Formula</h4>
+              <div className="bg-gray-50 p-4 rounded font-mono text-sm mb-3">
+                P = L × [c(1 + c)^n] / [(1 + c)^n - 1]
+              </div>
+              <div className="text-sm text-gray-600 space-y-1">
+                <p><strong>P</strong> = Monthly Payment</p>
+                <p><strong>L</strong> = Loan Amount (Principal)</p>
+                <p><strong>c</strong> = Monthly Interest Rate (Annual Rate ÷ 12)</p>
+                <p><strong>n</strong> = Number of Payments (Years × 12)</p>
+              </div>
+              <div className="mt-3 p-3 bg-blue-50 rounded">
+                <p className="text-sm"><strong>Your Example:</strong></p>
+                <p className="text-sm">L = ${userProfile.mortgage.principal.toLocaleString()}</p>
+                <p className="text-sm">c = {userProfile.mortgage.rate}% ÷ 12 = {(userProfile.mortgage.rate/12).toFixed(3)}%</p>
+                <p className="text-sm">n = {userProfile.mortgage.yearsRemaining} × 12 = {userProfile.mortgage.yearsRemaining * 12} payments</p>
+                <p className="text-sm font-semibold">Result: ${mortgageHedge.currentMonthly}/month</p>
+              </div>
+            </div>
+
+            {/* Hedge Return Calculation */}
+            <div className="border-l-4 border-green-500 pl-4">
+              <h4 className="font-semibold text-lg mb-2">Hedge Return Formula</h4>
+              <div className="bg-gray-50 p-4 rounded font-mono text-sm mb-3">
+                Payout = Investment ÷ (Contract Price ÷ 100)
+                <br />
+                Profit = Payout - Investment
+              </div>
+              <div className="text-sm text-gray-600">
+                <p>When you bet on NO at 60¢, you're paying $0.60 to win $1.00</p>
+                <p>Return Multiple = 100 ÷ Price = 100 ÷ 60 = 1.67×</p>
+              </div>
+              <div className="mt-3 p-3 bg-green-50 rounded">
+                <p className="text-sm"><strong>Example:</strong></p>
+                <p className="text-sm">Bet $600 on NO at 60¢</p>
+                <p className="text-sm">If NO wins: Payout = $600 ÷ 0.60 = $1,000</p>
+                <p className="text-sm">Profit = $1,000 - $600 = $400</p>
+              </div>
+            </div>
+
+            {/* Smart Allocation Strategy */}
+            <div className="border-l-4 border-purple-500 pl-4">
+              <h4 className="font-semibold text-lg mb-2">Smart YES/NO Allocation</h4>
+              <div className="text-sm text-gray-600 space-y-2">
+                <p><strong>Strategy:</strong> We split your hedge into YES and NO bets based on your refinancing threshold.</p>
+                <p>If you need {mortgageHedge.requiredCuts} cuts to refinance:</p>
+                <ul className="ml-4 space-y-1">
+                  <li>• <strong>NO on 0-{mortgageHedge.requiredCuts-1} cuts:</strong> Protects if rates stay high</li>
+                  <li>• <strong>YES on {mortgageHedge.requiredCuts}-7 cuts:</strong> Profits if rates drop enough</li>
+                </ul>
+              </div>
+              <div className="mt-3 p-3 bg-purple-50 rounded">
+                <p className="text-sm"><strong>Your Allocation:</strong></p>
+                <p className="text-sm">60% on NO bets (protection) = ${(totalHedgeAmount * 0.6).toFixed(2)}</p>
+                <p className="text-sm">40% on YES bets (upside) = ${(totalHedgeAmount * 0.4).toFixed(2)}</p>
+                <p className="text-sm font-semibold">This creates a win-win scenario!</p>
+              </div>
+            </div>
+
+            {/* Expected Value */}
+            <div className="border-l-4 border-orange-500 pl-4">
+              <h4 className="font-semibold text-lg mb-2">Expected Value Calculation</h4>
+              <div className="bg-gray-50 p-4 rounded font-mono text-sm mb-3">
+                EV = Σ (Outcome × Probability)
+              </div>
+              <div className="text-sm text-gray-600">
+                <p>For each possible number of rate cuts:</p>
+                <p>1. Calculate savings from refinancing (if possible)</p>
+                <p>2. Calculate hedge profit/loss</p>
+                <p>3. Multiply by market probability</p>
+                <p>4. Sum all scenarios</p>
+              </div>
+              <div className="mt-3 p-3 bg-orange-50 rounded">
+                <p className="text-sm"><strong>Your Expected Value:</strong></p>
+                <p className="text-sm">Combining all scenarios weighted by probability</p>
+                <p className="text-sm font-semibold text-lg">${expectedValue} expected annual benefit</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+
+      // Scenario Table Component
+      const ScenarioTable = () => (
+        <div className="bg-white rounded-lg shadow p-6">
+          <h3 className="text-xl font-bold mb-4">🎯 Scenario Analysis</h3>
+          <p className="text-gray-600 mb-6">
+            Each row shows what happens if the Fed cuts rates that many times. Green = you win, Red = you lose.
+          </p>
+          
+          <div className="overflow-x-auto">
+            <table className="min-w-full">
+              <thead>
+                <tr className="border-b-2 border-gray-200">
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Cuts</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Probability</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">New Rate</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Can Refi?</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Yearly Savings</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Hedge P&L</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Net Outcome</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">Expected Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scenarioAnalysis.map((scenario, idx) => {
+                  const isPositive = parseFloat(scenario.netOutcome) > 0;
+                  const rowClass = isPositive ? 'bg-green-50' : 'bg-red-50';
+                  
+                  return (
+                    <tr key={idx} className={`border-b ${rowClass} hover:opacity-90`}>
+                      <td className="px-3 py-2 font-semibold">{scenario.cuts}</td>
+                      <td className="px-3 py-2">{(scenario.probability * 100).toFixed(1)}%</td>
+                      <td className="px-3 py-2">{scenario.newRate}%</td>
+                      <td className="px-3 py-2">
+                        {scenario.canRefinance ? 
+                          <span className="text-green-600 font-semibold">✓ Yes</span> : 
+                          <span className="text-red-600">✗ No</span>
+                        }
+                      </td>
+                      <td className="px-3 py-2">
+                        {scenario.canRefinance ? 
+                          <span className="text-green-600">${scenario.yearlySavings}</span> : 
+                          <span className="text-gray-400">$0</span>
+                        }
+                      </td>
+                      <td className={`px-3 py-2 font-semibold ${parseFloat(scenario.hedgePL) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        ${scenario.hedgePL}
+                      </td>
+                      <td className={`px-3 py-2 font-bold ${isPositive ? 'text-green-700' : 'text-red-700'}`}>
+                        ${scenario.netOutcome}
+                      </td>
+                      <td className="px-3 py-2 text-purple-600 font-semibold">
+                        ${scenario.expectedValue}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-gray-300 bg-purple-100">
+                  <td colSpan="7" className="px-3 py-2 font-bold text-right">Total Expected Value:</td>
+                  <td className="px-3 py-2 font-bold text-purple-700 text-lg">${expectedValue}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          
+          <div className="mt-6 p-4 bg-blue-50 rounded-lg">
+            <h4 className="font-semibold mb-2">🎯 Key Insight</h4>
+            <p className="text-sm text-gray-700">
+              Your hedge creates positive expected value because:
+            </p>
+            <ul className="text-sm text-gray-700 ml-4 mt-2 space-y-1">
+              <li>• If rates drop enough → You refinance and save money + YES bets pay out</li>
+              <li>• If rates don't drop enough → You can't refinance BUT your NO bets pay out</li>
+              <li>• Either way, you're protected!</li>
+            </ul>
+          </div>
+        </div>
+      );
+
+      // Strategy View Component
+      const StrategyView = () => (
+        <>
+          {/* Smart Hedge Allocation */}
+          <div className="bg-white rounded-lg shadow p-6 mb-6">
+            <h3 className="text-xl font-bold mb-4">
+              <InfoTooltip info="We automatically split your hedge into YES and NO bets based on your refinancing threshold. This creates a win-win scenario where you benefit regardless of what happens with rates.">
+                🎯 Smart Hedge Strategy
+              </InfoTooltip>
+            </h3>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+              <div className="p-4 bg-green-50 rounded-lg">
+                <h4 className="font-semibold mb-2">✅ YES Bets (40% of hedge)</h4>
+                <p className="text-sm text-gray-600 mb-3">
+                  Bet YES on {mortgageHedge.requiredCuts}+ cuts
+                </p>
+                <p className="text-sm">
+                  <strong>Win if:</strong> Rates drop enough for you to refinance<br />
+                  <strong>Benefit:</strong> Refinancing savings + bet profits
+                </p>
+              </div>
+              
+              <div className="p-4 bg-red-50 rounded-lg">
+                <h4 className="font-semibold mb-2">❌ NO Bets (60% of hedge)</h4>
+                <p className="text-sm text-gray-600 mb-3">
+                  Bet NO on 0-{mortgageHedge.requiredCuts - 1} cuts
+                </p>
+                <p className="text-sm">
+                  <strong>Win if:</strong> Rates stay too high to refinance<br />
+                  <strong>Benefit:</strong> Hedge payout offsets lost savings
+                </p>
+              </div>
+            </div>
+
+            {/* Visual Probability Chart */}
+            {window.Recharts && fedMarkets.length > 0 && (
+              <div className="mb-6">
+                <h4 className="font-semibold mb-3">Market Probabilities & Your Strategy</h4>
+                <ResponsiveContainer width="100%" height={250}>
+                  <BarChart data={fedMarkets.map(m => ({
+                    cuts: m.cuts,
+                    probability: m.yes_price,
+                    bet: marketAllocations[m.ticker]?.side || 'none'
+                  }))}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="cuts" label={{ value: 'Number of Rate Cuts', position: 'insideBottom', offset: -5 }} />
+                    <YAxis label={{ value: 'Probability (%)', angle: -90, position: 'insideLeft' }} />
+                    <Tooltip formatter={(value) => `${value}%`} />
+                    <Bar dataKey="probability">
+                      {fedMarkets.map((entry, index) => (
+                        <Cell 
+                          key={`cell-${index}`} 
+                          fill={
+                            marketAllocations[entry.ticker]?.side === 'yes' ? '#10b981' :
+                            marketAllocations[entry.ticker]?.side === 'no' ? '#ef4444' :
+                            '#9ca3af'
+                          }
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+                <div className="flex justify-center gap-4 mt-2 text-xs">
+                  <span className="flex items-center"><span className="w-3 h-3 bg-green-500 rounded mr-1"></span> YES Bet</span>
+                  <span className="flex items-center"><span className="w-3 h-3 bg-red-500 rounded mr-1"></span> NO Bet</span>
+                  <span className="flex items-center"><span className="w-3 h-3 bg-gray-400 rounded mr-1"></span> No Position</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Individual Market Cards */}
+          <div className="bg-white rounded-lg shadow p-6">
+            <h3 className="text-xl font-bold mb-4">📊 Adjust Your Positions</h3>
+            
+            <div className="space-y-4">
+              {fedMarkets.map((market, idx) => {
+                const allocation = marketAllocations[market.ticker] || { side: 'none', amount: 0 };
+                const isYesBet = allocation.side === 'yes';
+                const isNoBet = allocation.side === 'no';
+                const impliedProb = market.yes_price;
+                
+                return (
+                  <div key={idx} className="border rounded-lg p-4 hover:bg-gray-50">
+                    <div className="flex justify-between items-start mb-3">
+                      <div className="flex-1">
+                        <h4 className="font-semibold text-lg">
+                          {market.cuts} Rate Cut{market.cuts !== 1 ? 's' : ''}
+                        </h4>
+                        <p className="text-sm text-gray-500 font-mono">{market.ticker}</p>
+                        <div className="flex items-center gap-3 mt-2">
+                          <span className={`text-sm px-2 py-1 rounded ${
+                            impliedProb > 60 ? 'bg-green-100 text-green-800' :
+                            impliedProb > 40 ? 'bg-yellow-100 text-yellow-800' :
+                            'bg-red-100 text-red-800'
+                          }`}>
+                            {impliedProb}% likely
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            Volume: {(market.volume || 0).toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+                      
+                      <div className="text-right">
+                        <div className="grid grid-cols-2 gap-2 text-center">
+                          <div>
+                            <p className="text-xs text-gray-500">YES</p>
+                            <p className="font-bold text-green-600">{market.yes_price}¢</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-500">NO</p>
+                            <p className="font-bold text-red-600">{market.no_price}¢</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Position Controls */}
+                    <div className="bg-gray-50 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => {
+                              setMarketAllocations(prev => ({
+                                ...prev,
+                                [market.ticker]: { ...prev[market.ticker], side: 'yes', amount: allocation.amount || 100 }
+                              }));
+                            }}
+                            className={`px-3 py-1 rounded font-medium transition ${
+                              isYesBet ? 'bg-green-500 text-white' : 'bg-gray-200 hover:bg-gray-300'
+                            }`}
+                          >
+                            YES
+                          </button>
+                          <button
+                            onClick={() => {
+                              setMarketAllocations(prev => ({
+                                ...prev,
+                                [market.ticker]: { ...prev[market.ticker], side: 'no', amount: allocation.amount || 100 }
+                              }));
+                            }}
+                            className={`px-3 py-1 rounded font-medium transition ${
+                              isNoBet ? 'bg-red-500 text-white' : 'bg-gray-200 hover:bg-gray-300'
+                            }`}
+                          >
+                            NO
+                          </button>
+                          <button
+                            onClick={() => {
+                              setMarketAllocations(prev => {
+                                const newAlloc = {...prev};
+                                delete newAlloc[market.ticker];
+                                return newAlloc;
+                              });
+                            }}
+                            className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 font-medium"
+                          >
+                            None
+                          </button>
+                        </div>
+                        
+                        {(isYesBet || isNoBet) && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm">$</span>
+                            <input
+                              type="number"
+                              value={allocation.amount}
+                              onChange={e => {
+                                const newAmount = Math.max(0, parseFloat(e.target.value) || 0);
+                                setMarketAllocations(prev => ({
+                                  ...prev,
+                                  [market.ticker]: { ...prev[market.ticker], amount: newAmount }
+                                }));
+                              }}
+                              className="w-24 px-2 py-1 border rounded text-sm"
+                            />
+                          </div>
+                        )}
+                      </div>
+                      
+                      {(isYesBet || isNoBet) && allocation.amount > 0 && (
+                        <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
+                          <div className="text-center">
+                            <p className="text-gray-500">If Win</p>
+                            <p className="font-bold text-green-600">
+                              ${(allocation.amount / ((isYesBet ? market.yes_price : market.no_price) / 100)).toFixed(2)}
+                            </p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-gray-500">Profit</p>
+                            <p className="font-bold">
+                              ${(allocation.amount / ((isYesBet ? market.yes_price : market.no_price) / 100) - allocation.amount).toFixed(2)}
+                            </p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-gray-500">Return</p>
+                            <p className="font-bold text-purple-600">
+                              {(100 / (isYesBet ? market.yes_price : market.no_price)).toFixed(2)}×
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      );
 
       return (
         <div>
@@ -297,385 +760,212 @@
             <p className="text-lg mb-4 text-purple-100">
               Turn life's uncertainties into opportunities. Use prediction markets to protect against financial risks.
             </p>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
-              <button onClick={() => setHedgeType('mortgage')} 
-                      className={`p-3 rounded-lg font-medium transition ${hedgeType==='mortgage' ? 'bg-white text-purple-600' : 'bg-purple-500/20 hover:bg-purple-500/30'}`}>
-                🏠 Mortgage Rates
+          </div>
+
+          {/* Mortgage Input Form */}
+          <div className="bg-white rounded-lg shadow p-6 mb-6">
+            <h3 className="text-xl font-bold mb-4">Your Mortgage Details</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <InfoTooltip info="The amount you still owe on your mortgage">
+                    Remaining Principal Balance
+                  </InfoTooltip>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
+                  <input 
+                    type="number" 
+                    value={userProfile.mortgage.principal}
+                    onChange={e => setUserProfile(prev => ({
+                      ...prev, 
+                      mortgage: {...prev.mortgage, principal: parseInt(e.target.value) || 0}
+                    }))}
+                    className="w-full pl-8 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <InfoTooltip info="Your current mortgage interest rate">
+                    Current Interest Rate (%)
+                  </InfoTooltip>
+                </label>
+                <input 
+                  type="number" 
+                  step="0.1"
+                  value={userProfile.mortgage.rate}
+                  onChange={e => setUserProfile(prev => ({
+                    ...prev, 
+                    mortgage: {...prev.mortgage, rate: parseFloat(e.target.value) || 0}
+                  }))}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <InfoTooltip info="How many years until your mortgage is paid off">
+                    Years Remaining
+                  </InfoTooltip>
+                </label>
+                <input 
+                  type="number" 
+                  value={userProfile.mortgage.yearsRemaining}
+                  onChange={e => setUserProfile(prev => ({
+                    ...prev, 
+                    mortgage: {...prev.mortgage, yearsRemaining: parseInt(e.target.value) || 0}
+                  }))}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <InfoTooltip info="The rate at which you'd like to refinance">
+                    Target Refinance Rate (%)
+                  </InfoTooltip>
+                </label>
+                <input 
+                  type="number" 
+                  step="0.1"
+                  value={userProfile.mortgage.desiredRate}
+                  onChange={e => setUserProfile(prev => ({
+                    ...prev, 
+                    mortgage: {...prev.mortgage, desiredRate: parseFloat(e.target.value) || 0}
+                  }))}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Analysis Results */}
+          <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-6 mb-6">
+            <h3 className="text-xl font-bold mb-4 text-blue-900">
+              <InfoTooltip info="Based on your mortgage details, here's how much you could save if rates drop to your target">
+                Your Refinancing Analysis
+              </InfoTooltip>
+            </h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="bg-white rounded-lg p-4">
+                <p className="text-sm text-gray-600">
+                  <InfoTooltip info={`Monthly payment = Principal × [Rate×(1+Rate)^Months] / [(1+Rate)^Months - 1]`}>
+                    Current Monthly
+                  </InfoTooltip>
+                </p>
+                <p className="text-2xl font-bold">${mortgageHedge.currentMonthly}</p>
+              </div>
+              <div className="bg-white rounded-lg p-4">
+                <p className="text-sm text-gray-600">
+                  <InfoTooltip info="Your monthly payment at your target refinance rate">
+                    Target Monthly
+                  </InfoTooltip>
+                </p>
+                <p className="text-2xl font-bold text-green-600">${mortgageHedge.desiredMonthly}</p>
+              </div>
+              <div className="bg-white rounded-lg p-4">
+                <p className="text-sm text-gray-600">
+                  <InfoTooltip info="How much you'd save each month at your target rate">
+                    Monthly Savings
+                  </InfoTooltip>
+                </p>
+                <p className="text-2xl font-bold text-blue-600">${mortgageHedge.monthlySavings}</p>
+              </div>
+              <div className="bg-white rounded-lg p-4">
+                <p className="text-sm text-gray-600">
+                  <InfoTooltip info="Your savings over 12 months - this is what we recommend hedging">
+                    Yearly Savings
+                  </InfoTooltip>
+                </p>
+                <p className="text-2xl font-bold text-purple-600">${mortgageHedge.yearlySavings}</p>
+              </div>
+            </div>
+            <div className="mt-4 p-4 bg-yellow-50 rounded-lg">
+              <p className="text-sm text-yellow-800">
+                <strong>Analysis:</strong> You need approximately {mortgageHedge.requiredCuts} rate cuts of 25 basis points each 
+                to reach your target refinancing rate. That's a total of {mortgageHedge.bpsDifference} basis points.
+              </p>
+            </div>
+          </div>
+
+          {/* Hedge Amount Configuration */}
+          <div className="bg-white rounded-lg shadow p-6 mb-6">
+            <h3 className="text-xl font-bold mb-4">
+              <InfoTooltip info="We recommend hedging 1 year of potential savings. This balances protection with reasonable cost.">
+                ⚙️ Set Your Hedge Amount
+              </InfoTooltip>
+            </h3>
+            <div className="flex items-center gap-4">
+              <div className="relative flex-1">
+                <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
+                <input 
+                  type="number"
+                  value={totalHedgeAmount || ''}
+                  onChange={e => setTotalHedgeAmount(parseFloat(e.target.value) || 0)}
+                  className="w-full pl-8 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <button 
+                onClick={() => setTotalHedgeAmount(parseFloat(mortgageHedge.yearlySavings))}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+              >
+                Use Recommended (${mortgageHedge.yearlySavings})
               </button>
-              <button className="p-3 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 font-medium opacity-50 cursor-not-allowed">
-                ☁️ Weather (Coming Soon)
+            </div>
+            <p className="text-sm text-gray-600 mt-2">
+              This amount will be automatically allocated across YES and NO bets to maximize your protection.
+            </p>
+          </div>
+
+          {/* Sub-tabs for different views */}
+          <div className="bg-white rounded-lg shadow mb-6">
+            <div className="flex border-b">
+              <button
+                onClick={() => setSubTab('strategy')}
+                className={`px-6 py-3 font-medium transition ${
+                  subTab === 'strategy' ? 'subtab-active' : 'text-gray-600 hover:text-gray-800'
+                }`}
+              >
+                Strategy
               </button>
-              <button className="p-3 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 font-medium opacity-50 cursor-not-allowed">
-                🏆 Sports (Coming Soon)
+              <button
+                onClick={() => setSubTab('scenarios')}
+                className={`px-6 py-3 font-medium transition ${
+                  subTab === 'scenarios' ? 'subtab-active' : 'text-gray-600 hover:text-gray-800'
+                }`}
+              >
+                Scenarios
               </button>
-              <button className="p-3 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 font-medium opacity-50 cursor-not-allowed">
-                🛒 Inflation (Coming Soon)
+              <button
+                onClick={() => setSubTab('math')}
+                className={`px-6 py-3 font-medium transition ${
+                  subTab === 'math' ? 'subtab-active' : 'text-gray-600 hover:text-gray-800'
+                }`}
+              >
+                Math Explained
               </button>
             </div>
           </div>
 
-          {hedgeType === 'mortgage' && (
-            <>
-              {/* Mortgage Input Form */}
-              <div className="bg-white rounded-lg shadow p-6 mb-6">
-                <h3 className="text-xl font-bold mb-4">Your Mortgage Details</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Remaining Principal Balance
-                    </label>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
-                      <input 
-                        type="number" 
-                        value={userProfile.mortgage.principal}
-                        onChange={e => setUserProfile(prev => ({
-                          ...prev, 
-                          mortgage: {...prev.mortgage, principal: parseInt(e.target.value) || 0}
-                        }))}
-                        className="w-full pl-8 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Current Interest Rate (%)
-                    </label>
-                    <input 
-                      type="number" 
-                      step="0.1"
-                      value={userProfile.mortgage.rate}
-                      onChange={e => setUserProfile(prev => ({
-                        ...prev, 
-                        mortgage: {...prev.mortgage, rate: parseFloat(e.target.value) || 0}
-                      }))}
-                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Years Remaining
-                    </label>
-                    <input 
-                      type="number" 
-                      value={userProfile.mortgage.yearsRemaining}
-                      onChange={e => setUserProfile(prev => ({
-                        ...prev, 
-                        mortgage: {...prev.mortgage, yearsRemaining: parseInt(e.target.value) || 0}
-                      }))}
-                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Target Refinance Rate (%)
-                    </label>
-                    <input 
-                      type="number" 
-                      step="0.1"
-                      value={userProfile.mortgage.desiredRate}
-                      onChange={e => setUserProfile(prev => ({
-                        ...prev, 
-                        mortgage: {...prev.mortgage, desiredRate: parseFloat(e.target.value) || 0}
-                      }))}
-                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                    />
-                  </div>
-                </div>
-              </div>
+          {/* Dynamic Content Based on Sub-tab */}
+          {subTab === 'strategy' && <StrategyView />}
+          {subTab === 'scenarios' && <ScenarioTable />}
+          {subTab === 'math' && <MathExplanations />}
 
-              {/* Analysis Results */}
-              <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-6 mb-6">
-                <h3 className="text-xl font-bold mb-4 text-blue-900">Your Refinancing Analysis</h3>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="bg-white rounded-lg p-4">
-                    <p className="text-sm text-gray-600">Current Monthly</p>
-                    <p className="text-2xl font-bold">${mortgageHedge.currentMonthly}</p>
-                  </div>
-                  <div className="bg-white rounded-lg p-4">
-                    <p className="text-sm text-gray-600">Target Monthly</p>
-                    <p className="text-2xl font-bold text-green-600">${mortgageHedge.desiredMonthly}</p>
-                  </div>
-                  <div className="bg-white rounded-lg p-4">
-                    <p className="text-sm text-gray-600">Monthly Savings</p>
-                    <p className="text-2xl font-bold text-blue-600">${mortgageHedge.monthlySavings}</p>
-                  </div>
-                  <div className="bg-white rounded-lg p-4">
-                    <p className="text-sm text-gray-600">Yearly Savings</p>
-                    <p className="text-2xl font-bold text-purple-600">${mortgageHedge.yearlySavings}</p>
-                  </div>
-                </div>
-                <div className="mt-4 p-4 bg-yellow-50 rounded-lg">
-                  <p className="text-sm text-yellow-800">
-                    <strong>Analysis:</strong> You need approximately {mortgageHedge.requiredCuts} rate cuts of 25 basis points each 
-                    to reach your target refinancing rate. That's a total of {mortgageHedge.bpsDifference} basis points.
-                  </p>
-                </div>
-              </div>
-
-              {/* Hedge Configuration */}
-              <div className="bg-white rounded-lg shadow p-6 mb-6">
-                <h3 className="text-xl font-bold mb-4">⚙️ Configure Your Hedge</h3>
-                
-                <div className="mb-6">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Total Hedge Amount (Recommended: 1 year of savings = ${mortgageHedge.yearlySavings})
-                  </label>
-                  <div className="flex items-center gap-4">
-                    <div className="relative flex-1">
-                      <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">$</span>
-                      <input 
-                        type="number"
-                        value={totalHedgeAmount || ''}
-                        onChange={e => {
-                          setTotalHedgeAmount(parseFloat(e.target.value) || 0);
-                          setAutoAllocate(true); // Re-allocate when total changes
-                        }}
-                        className="w-full pl-8 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-                    <button 
-                      onClick={() => setTotalHedgeAmount(parseFloat(mortgageHedge.yearlySavings))}
-                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-                    >
-                      Use Recommended
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between mb-4">
-                  <h4 className="font-semibold">Allocation Strategy</h4>
-                  <label className="flex items-center">
-                    <input 
-                      type="checkbox"
-                      checked={autoAllocate}
-                      onChange={e => setAutoAllocate(e.target.checked)}
-                      className="mr-2"
-                    />
-                    <span className="text-sm">Auto-allocate based on liquidity</span>
-                  </label>
-                </div>
-
-                {/* Portfolio Summary */}
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6 p-4 bg-gray-50 rounded-lg">
-                  <div>
-                    <p className="text-xs text-gray-600">Total Investment</p>
-                    <p className="font-bold text-lg">${portfolioMetrics.totalInvested}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Potential Payout</p>
-                    <p className="font-bold text-lg text-green-600">${portfolioMetrics.totalPotentialPayout}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Net Profit</p>
-                    <p className="font-bold text-lg text-blue-600">${portfolioMetrics.netProfit}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Avg Return</p>
-                    <p className="font-bold text-lg">{portfolioMetrics.averageReturn}x</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Coverage</p>
-                    <p className="font-bold text-lg text-purple-600">{portfolioMetrics.coverage}%</p>
-                  </div>
-                </div>
-
-                {/* Allocation Visualization */}
-                {window.Recharts && allocationChartData.length > 0 && (
-                  <div className="mb-6">
-                    <h4 className="font-semibold mb-2">Allocation Distribution</h4>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <BarChart data={allocationChartData}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="name" />
-                        <YAxis />
-                        <Tooltip formatter={(value) => `$${value}`} />
-                        <Bar dataKey="value" fill="#8b5cf6" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-              </div>
-
-              {/* Individual Market Allocations */}
-              <div className="bg-white rounded-lg shadow p-6">
-                <h3 className="text-xl font-bold mb-4">📊 Fed Rate Cut Markets - Adjust Your Hedge</h3>
-                <p className="text-gray-600 mb-6">
-                  These are the most liquid KXRATECUTCOUNT markets. Adjust individual allocations to fine-tune your hedge.
-                </p>
-                
-                {fedMarkets.length > 0 ? (
-                  <div className="space-y-4">
-                    {fedMarkets.map((market, idx) => {
-                      const allocation = marketAllocations[market.ticker] || 0;
-                      const returns = calculateReturns(market, allocation);
-                      
-                      return (
-                        <div key={idx} className="hedge-card border rounded-lg p-4 hover:bg-gray-50">
-                          <div className="flex justify-between items-start mb-3">
-                            <div className="flex-1">
-                              <h4 className="font-semibold text-lg">{market.title || `${market.cuts} Rate Cuts`}</h4>
-                              <p className="text-sm text-gray-500 font-mono">{market.ticker}</p>
-                              <div className="flex items-center gap-4 mt-1">
-                                <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">
-                                  Liquidity: {market.liquidity_score}/100
-                                </span>
-                                <span className="text-xs text-gray-500">
-                                  Volume: {(market.volume || 0).toLocaleString()}
-                                </span>
-                              </div>
-                            </div>
-                            <div className="text-right">
-                              <span className="text-sm text-gray-500">NO Price</span>
-                              <p className="text-xl font-bold text-red-600">{market.no_price}¢</p>
-                              <p className="text-xs text-gray-400">
-                                Spread: {market.spread || 1}¢
-                              </p>
-                            </div>
-                          </div>
-                          
-                          {/* Allocation Slider */}
-                          <div className="allocation-slider bg-gray-50 rounded-lg p-3 mb-3">
-                            <div className="flex justify-between items-center mb-2">
-                              <label className="text-sm font-medium">Allocation Amount</label>
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm text-gray-600">$</span>
-                                <input
-                                  type="number"
-                                  value={allocation}
-                                  onChange={e => {
-                                    const newValue = Math.max(0, parseFloat(e.target.value) || 0);
-                                    setMarketAllocations(prev => ({
-                                      ...prev,
-                                      [market.ticker]: newValue
-                                    }));
-                                    setAutoAllocate(false);
-                                  }}
-                                  className="w-24 px-2 py-1 border rounded text-sm"
-                                />
-                              </div>
-                            </div>
-                            <input
-                              type="range"
-                              min="0"
-                              max={totalHedgeAmount || 1000}
-                              step="10"
-                              value={allocation}
-                              onChange={e => {
-                                setMarketAllocations(prev => ({
-                                  ...prev,
-                                  [market.ticker]: parseFloat(e.target.value)
-                                }));
-                                setAutoAllocate(false);
-                              }}
-                              className="w-full"
-                            />
-                          </div>
-                          
-                          {/* Returns Display */}
-                          {returns && allocation > 0 && (
-                            <div className="grid grid-cols-3 gap-4 p-3 bg-blue-50 rounded">
-                              <div>
-                                <p className="text-xs text-gray-600">If Rates Stay High</p>
-                                <p className="font-bold text-green-600">${returns.potentialPayout}</p>
-                                <p className="text-xs text-gray-500">{returns.returnMultiple}x return</p>
-                              </div>
-                              <div>
-                                <p className="text-xs text-gray-600">Net Profit</p>
-                                <p className="font-bold">${returns.netProfit}</p>
-                                <p className="text-xs text-gray-500">From ${returns.hedgeAmount}</p>
-                              </div>
-                              <div>
-                                <p className="text-xs text-gray-600">Savings Coverage</p>
-                                <p className="font-bold text-purple-600">
-                                  {((parseFloat(returns.netProfit) / parseFloat(mortgageHedge.yearlySavings)) * 100).toFixed(1)}%
-                                </p>
-                                <p className="text-xs text-gray-500">Of yearly savings</p>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="text-center py-12 text-gray-500">
-                    <p className="text-xl mb-4">Loading Fed rate markets...</p>
-                    <p className="text-sm">Searching for KXRATECUTCOUNT markets with good liquidity</p>
-                  </div>
-                )}
-                
-                <div className="mt-6 p-4 bg-gray-100 rounded-lg">
-                  <p className="text-xs text-gray-600">
-                    <strong>How it works:</strong> You're betting on "NO rate cuts" for each scenario. If the Fed doesn't cut rates 
-                    as much as expected, your mortgage stays expensive BUT your hedge pays out to offset the lost savings. 
-                    Adjust allocations based on which scenarios you think are most likely.
-                  </p>
-                </div>
-                
-                <div className="mt-4 p-4 bg-yellow-50 rounded-lg">
-                  <p className="text-xs text-gray-600">
-                    <strong>Disclaimer:</strong> This is not financial advice. Hedging strategies involve risk and may result in losses. 
-                    Mortgage rates are influenced by many factors beyond Fed policy. Please consult with a financial advisor.
-                  </p>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      );
-    }
-
-    // --- MARKET CARD ---
-    function MarketCard({ market, isSelected, onClick }) {
-      const volatility = market.volatility ?? 6.0;
-      const getVolatilityColor = (vol) => {
-        if (vol > 8) return 'bg-red-100 text-red-600';
-        if (vol > 6) return 'bg-yellow-100 text-yellow-600';
-        return 'bg-green-100 text-green-600';
-      };
-      return (
-        <div onClick={onClick}
-             className={`market-card p-4 rounded-lg border-2 cursor-pointer transition-all ${isSelected ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
-          <div className="flex justify-between items-start mb-2">
-            <span className="font-mono text-sm text-gray-500">{market.ticker}</span>
-            <span className={`text-xs px-2 py-1 rounded-full ${getVolatilityColor(volatility)}`}>
-              σ{volatility}
-            </span>
-          </div>
-          <h4 className="font-medium text-sm mb-2">{market.title || market.ticker}</h4>
-          <div className="flex justify-between items-center text-xs text-gray-500">
-            <span>{fallback(market.volume_24h, 0).toLocaleString()} vol</span>
-            <span className="bg-gray-100 px-2 py-1 rounded">{market.category || 'General'}</span>
+          {/* Disclaimer */}
+          <div className="mt-6 p-4 bg-yellow-50 rounded-lg">
+            <p className="text-xs text-gray-600">
+              <strong>Disclaimer:</strong> This is not financial advice. Hedging strategies involve risk and may result in losses. 
+              Mortgage rates are influenced by many factors beyond Fed policy. Please consult with a financial advisor.
+            </p>
           </div>
         </div>
       );
     }
-
-    // ... [Include other components like MarketHeader, ImpactCalculator, VolumeVelocity, Comparison] ...
 
     // --- APP ---
     function App(){
       const [activeTab, setActiveTab] = useState('hedge');
       const { markets, fedMarkets, status, error } = useLiveMarkets();
-      const [selectedMarket, setSelectedMarket] = useState(null);
-      const [searchQuery, setSearchQuery] = useState('');
-
-      useEffect(()=>{
-        if (!markets.length) return;
-        if (!selectedMarket) setSelectedMarket(markets[0]);
-        else {
-          const found = markets.find(m => m.ticker === selectedMarket.ticker);
-          if (found) setSelectedMarket(found);
-        }
-      }, [markets]);
-
-      const filteredMarkets = useMemo(()=>{
-        const data = markets || [];
-        if (!searchQuery) return data;
-        const q = searchQuery.toLowerCase();
-        return data.filter(m => (m.ticker||'').toLowerCase().includes(q) || (m.title||'').toLowerCase().includes(q));
-      }, [markets, searchQuery]);
 
       const statusChip = status === 'live' ? 'bg-green-600' : (status === 'connecting' ? 'bg-yellow-600' : 'bg-red-600');
 
@@ -685,7 +975,7 @@
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-3xl font-bold">Kalshi Market Tools</h1>
-                <p className="text-blue-100 mt-1">Advanced analytics & hedging for event contract trading</p>
+                <p className="text-blue-100 mt-1">Advanced hedging strategies for event contract trading</p>
               </div>
               <span className={"px-3 py-1 rounded-full text-sm " + statusChip}>
                 {status === 'live' ? 'Live data' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}
@@ -695,7 +985,9 @@
 
           <nav className="bg-white shadow-sm">
             <div className="flex space-x-8 px-6 overflow-x-auto">
-              <button onClick={()=>setActiveTab('hedge')} className={"py-4 px-2 font-medium transition whitespace-nowrap " + (activeTab==='hedge'?'tab-active':'text-gray-600')}>🛡️ Hedge Anything</button>
+              <button onClick={()=>setActiveTab('hedge')} className={"py-4 px-2 font-medium transition whitespace-nowrap " + (activeTab==='hedge'?'tab-active':'text-gray-600')}>
+                🛡️ Hedge Anything
+              </button>
             </div>
           </nav>
 

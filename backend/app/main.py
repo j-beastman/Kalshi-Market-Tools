@@ -49,7 +49,7 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
 # ---------- App ----------
-app = FastAPI(title="Kalshi Pipeline API", version="0.2.0")
+app = FastAPI(title="Kalshi Pipeline API", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -100,7 +100,12 @@ class MortgageHedgeRequest(BaseModel):
     years_remaining: int
     target_rate: float
     total_hedge_amount: Optional[float] = None
-    allocations: Optional[Dict[str, float]] = None
+    allocations: Optional[Dict[str, Dict[str, Any]]] = None  # { ticker: { side: 'yes'|'no', amount: 100 } }
+
+class ScenarioAnalysisRequest(BaseModel):
+    mortgage: Dict[str, Any]
+    allocations: Dict[str, Dict[str, Any]]
+    fed_markets: List[Dict[str, Any]]
 
 # ---------- Routes ----------
 @app.get("/health")
@@ -141,17 +146,15 @@ def get_markets():
 def get_fed_markets():
     """
     Get Fed rate cut markets for hedging calculations.
-    Filters for KXRATECUTCOUNT series and ensures good liquidity.
+    Returns markets sorted by number of cuts for easy organization.
     """
     with SessionLocal() as s:
-        # Get latest quotes for KXRATECUTCOUNT markets
         subq = (
             select(Quote.ticker, func.max(Quote.ts).label("max_ts"))
             .group_by(Quote.ticker)
             .subquery()
         )
         
-        # Query for Fed rate cut markets with liquidity data
         q = (
             select(
                 Market.ticker, 
@@ -169,75 +172,68 @@ def get_fed_markets():
             .join(subq, subq.c.ticker == Market.ticker, isouter=True)
             .join(Quote, (Quote.ticker == subq.c.ticker) & (Quote.ts == subq.c.max_ts), isouter=True)
             .where(Market.ticker.like('KXRATECUTCOUNT%'))
-            .order_by(Quote.volume.desc().nullslast())
+            .order_by(Market.ticker)  # Sort by ticker to get cuts in order
         )
         rows = s.execute(q).all()
         
-        # Process and filter markets
-        MIN_VOLUME = 100  # Minimum volume for liquidity
+        MIN_VOLUME = 50  # Lower minimum for more markets
         fed_markets = []
         
         for row in rows:
             ticker, title, category, last_update, yes_last, no_last, volume, yes_bid, yes_ask, no_bid, no_ask = row
             
-            # Skip if no volume data
-            if not volume or volume < MIN_VOLUME:
-                continue
-            
-            # Extract number of cuts from ticker
+            # Extract number of cuts
             cuts = 0
             if '-' in ticker:
                 try:
-                    parts = ticker.split('-')
-                    if len(parts) >= 2:
-                        cuts = int(parts[-1])
+                    cuts = int(ticker.split('-')[-1])
                 except:
                     cuts = 0
             
-            # Calculate spread for liquidity assessment
+            # Calculate spread and liquidity
             spread = 0
             if yes_bid and yes_ask:
                 spread = yes_ask - yes_bid
             elif no_bid and no_ask:
                 spread = no_ask - no_bid
             
-            # Calculate liquidity score (0-100)
-            volume_score = min(50, (volume / 1000) * 25)  # Up to 50 points for volume
-            spread_score = max(0, 50 - spread * 2)  # Up to 50 points for tight spread
-            liquidity_score = volume_score + spread_score
-            
-            fed_markets.append({
-                "ticker": ticker,
-                "title": title or f"Fed cuts rates {cuts} time{'s' if cuts != 1 else ''} by Dec 2025",
-                "cuts": cuts,
-                "yes_price": yes_last or 50,
-                "no_price": no_last or 50,
-                "yes_bid": yes_bid or (yes_last - 1 if yes_last else 49),
-                "yes_ask": yes_ask or (yes_last + 1 if yes_last else 51),
-                "no_bid": no_bid or (no_last - 1 if no_last else 49),
-                "no_ask": no_ask or (no_last + 1 if no_last else 51),
-                "volume": volume,
-                "spread": spread,
-                "liquidity_score": round(liquidity_score, 1)
-            })
+            # Include all markets with some volume
+            if volume and volume >= MIN_VOLUME:
+                volume_score = min(50, (volume / 1000) * 25)
+                spread_score = max(0, 50 - spread * 2)
+                liquidity_score = volume_score + spread_score
+                
+                fed_markets.append({
+                    "ticker": ticker,
+                    "title": title or f"Fed cuts rates {cuts} time{'s' if cuts != 1 else ''} by Dec 2025",
+                    "cuts": cuts,
+                    "yes_price": yes_last or 50,
+                    "no_price": no_last or 50,
+                    "yes_bid": yes_bid or (yes_last - 1 if yes_last else 49),
+                    "yes_ask": yes_ask or (yes_last + 1 if yes_last else 51),
+                    "no_bid": no_bid or (no_last - 1 if no_last else 49),
+                    "no_ask": no_ask or (no_last + 1 if no_last else 51),
+                    "volume": volume,
+                    "spread": spread,
+                    "liquidity_score": round(liquidity_score, 1),
+                    "implied_probability": yes_last / 100 if yes_last else 0.5
+                })
         
-        # Sort by liquidity score (best liquidity first)
-        fed_markets.sort(key=lambda x: x['liquidity_score'], reverse=True)
+        # Sort by number of cuts (ascending) for logical organization
+        fed_markets.sort(key=lambda x: x['cuts'])
         
-        # Return top 10 most liquid markets
         return {
-            "markets": fed_markets[:10],
-            "count": len(fed_markets[:10]),
+            "markets": fed_markets,
+            "count": len(fed_markets),
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
 @app.post("/calculate-hedge")
 def calculate_hedge(request: MortgageHedgeRequest):
     """
-    Calculate potential savings from hedging strategy.
-    This endpoint processes mortgage details and returns hedge recommendations.
+    Calculate potential savings and smart hedge allocation.
     """
-    # Calculate monthly payment savings
+    # Calculate monthly payments
     months = request.years_remaining * 12
     monthly_rate_current = request.current_rate / 100 / 12
     monthly_rate_target = request.target_rate / 100 / 12
@@ -263,13 +259,23 @@ def calculate_hedge(request: MortgageHedgeRequest):
     yearly_savings = monthly_savings * 12
     total_savings = monthly_savings * months
     
-    # Calculate rate cuts needed (assuming 25bps per cut affects mortgage rates by ~20bps)
+    # Calculate rate cuts needed
     bps_difference = (request.current_rate - request.target_rate) * 100
-    cuts_needed = int(bps_difference / 20)  # Rough estimate
+    cuts_needed = int(bps_difference / 25)  # 25bps per cut
     
-    # Default hedge amount if not provided
+    # Default hedge amount
     if not request.total_hedge_amount:
-        request.total_hedge_amount = yearly_savings  # Hedge 1 year of savings
+        request.total_hedge_amount = yearly_savings
+    
+    # Smart allocation strategy
+    allocation_strategy = {
+        "threshold": cuts_needed,
+        "no_bet_range": f"0-{cuts_needed-1} cuts",
+        "yes_bet_range": f"{cuts_needed}-7 cuts",
+        "no_allocation": request.total_hedge_amount * 0.6,
+        "yes_allocation": request.total_hedge_amount * 0.4,
+        "rationale": "60% NO protects against rates staying high, 40% YES captures upside if rates drop enough"
+    }
     
     return {
         "current_payment": round(current_payment, 2),
@@ -278,7 +284,134 @@ def calculate_hedge(request: MortgageHedgeRequest):
         "yearly_savings": round(yearly_savings, 2),
         "total_savings": round(total_savings, 2),
         "cuts_needed": cuts_needed,
+        "bps_difference": bps_difference,
         "recommended_hedge": round(request.total_hedge_amount, 2),
+        "allocation_strategy": allocation_strategy,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+@app.post("/scenario-analysis")
+def scenario_analysis(request: ScenarioAnalysisRequest):
+    """
+    Analyze outcomes for each possible Fed rate scenario.
+    """
+    scenarios = []
+    mortgage = request.mortgage
+    allocations = request.allocations
+    fed_markets = request.fed_markets
+    
+    principal = mortgage.get('principal', 400000)
+    current_rate = mortgage.get('current_rate', 7.0)
+    years_remaining = mortgage.get('years_remaining', 25)
+    target_rate = mortgage.get('target_rate', 5.5)
+    months = years_remaining * 12
+    
+    # Current monthly payment
+    monthly_rate_current = current_rate / 100 / 12
+    if monthly_rate_current > 0:
+        current_payment = principal * (
+            monthly_rate_current * (1 + monthly_rate_current) ** months
+        ) / ((1 + monthly_rate_current) ** months - 1)
+    else:
+        current_payment = principal / months
+    
+    # Analyze each scenario
+    for market in fed_markets:
+        cuts = market['cuts']
+        new_rate = max(3.0, current_rate - (cuts * 0.25))  # 25bps per cut
+        
+        # New payment at this rate
+        new_monthly_rate = new_rate / 100 / 12
+        if new_monthly_rate > 0:
+            new_payment = principal * (
+                new_monthly_rate * (1 + new_monthly_rate) ** months
+            ) / ((1 + new_monthly_rate) ** months - 1)
+        else:
+            new_payment = principal / months
+        
+        # Calculate savings
+        monthly_savings = current_payment - new_payment
+        yearly_savings = monthly_savings * 12
+        can_refinance = new_rate <= target_rate
+        
+        # Calculate hedge P&L
+        hedge_pl = 0
+        positions = []
+        
+        for ticker, alloc in allocations.items():
+            # Find the market for this allocation
+            hedge_market = next((m for m in fed_markets if m['ticker'] == ticker), None)
+            if not hedge_market:
+                continue
+            
+            side = alloc.get('side', 'none')
+            amount = alloc.get('amount', 0)
+            
+            if side == 'none' or amount <= 0:
+                continue
+            
+            # Determine if bet wins in this scenario
+            bet_wins = False
+            if cuts == hedge_market['cuts']:
+                # This is the market that happens
+                bet_wins = (side == 'yes')
+            else:
+                # This market doesn't happen
+                bet_wins = (side == 'no')
+            
+            if bet_wins:
+                price = hedge_market['yes_price'] if side == 'yes' else hedge_market['no_price']
+                payout = amount / (price / 100)
+                profit = payout - amount
+                hedge_pl += profit
+            else:
+                hedge_pl -= amount
+            
+            positions.append({
+                "ticker": ticker,
+                "side": side,
+                "amount": amount,
+                "wins": bet_wins,
+                "pl": profit if bet_wins else -amount
+            })
+        
+        # Expected value
+        probability = market['yes_price'] / 100
+        expected_value = (yearly_savings + hedge_pl) * probability if can_refinance else hedge_pl * probability
+        
+        scenarios.append({
+            "cuts": cuts,
+            "new_rate": round(new_rate, 2),
+            "probability": round(probability, 3),
+            "can_refinance": can_refinance,
+            "monthly_savings": round(monthly_savings, 2) if can_refinance else 0,
+            "yearly_savings": round(yearly_savings, 2) if can_refinance else 0,
+            "hedge_pl": round(hedge_pl, 2),
+            "net_outcome": round(yearly_savings + hedge_pl if can_refinance else hedge_pl, 2),
+            "expected_value": round(expected_value, 2),
+            "positions": positions
+        })
+    
+    # Calculate overall expected value
+    total_ev = sum(s['expected_value'] for s in scenarios)
+    
+    # Find best and worst scenarios
+    best_scenario = max(scenarios, key=lambda s: s['net_outcome'])
+    worst_scenario = min(scenarios, key=lambda s: s['net_outcome'])
+    
+    return {
+        "scenarios": scenarios,
+        "total_expected_value": round(total_ev, 2),
+        "best_scenario": {
+            "cuts": best_scenario['cuts'],
+            "outcome": best_scenario['net_outcome']
+        },
+        "worst_scenario": {
+            "cuts": worst_scenario['cuts'],
+            "outcome": worst_scenario['net_outcome']
+        },
+        "positive_scenarios": sum(1 for s in scenarios if s['net_outcome'] > 0),
+        "negative_scenarios": sum(1 for s in scenarios if s['net_outcome'] < 0),
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -302,21 +435,30 @@ def get_market_detail(ticker: str):
             "series": [{"ts": ts.isoformat(), "yes": y or 0, "no": n or 0, "vol": v or 0} for ts, y, n, v in rows[::-1]]
         }
 
-# ---------- Background puller with Fed markets simulation ----------
+# ---------- Background puller with realistic Fed markets ----------
 import random
 
 def _seed_if_empty():
     with SessionLocal() as s:
-        # Add regular markets
-        if s.get(Market, "RATE-CUT-DEC") is None:
-            s.add(Market(ticker="RATE-CUT-DEC", title="Fed cuts rates in December?", category="Fed", last_update=datetime.now(timezone.utc)))
-            s.commit()
+        # Add KXRATECUTCOUNT markets with realistic probabilities
+        probabilities = {
+            0: 10,  # 10% chance of no cuts
+            1: 20,  # 20% chance of 1 cut
+            2: 30,  # 30% chance of 2 cuts (most likely)
+            3: 25,  # 25% chance of 3 cuts
+            4: 10,  # 10% chance of 4 cuts
+            5: 3,   # 3% chance of 5 cuts
+            6: 1,   # 1% chance of 6 cuts
+            7: 1    # 1% chance of 7 cuts
+        }
         
-        # Add KXRATECUTCOUNT series markets
-        for cuts in range(0, 8):
+        for cuts, yes_prob in probabilities.items():
             ticker = f"KXRATECUTCOUNT-{cuts}"
             if s.get(Market, ticker) is None:
-                title = f"Fed cuts rates {cuts} time{'s' if cuts != 1 else ''} by Dec 2025"
+                if cuts == 1:
+                    title = f"Fed cuts rates exactly 1 time by Dec 2025"
+                else:
+                    title = f"Fed cuts rates exactly {cuts} times by Dec 2025"
                 s.add(Market(
                     ticker=ticker, 
                     title=title, 
@@ -326,38 +468,46 @@ def _seed_if_empty():
         s.commit()
 
 def pull_once():
-    """Simulate market data updates including Fed markets"""
+    """Simulate realistic Fed market data"""
     now = datetime.now(timezone.utc)
+    
+    # Realistic base probabilities
+    base_probabilities = {
+        0: 10, 1: 20, 2: 30, 3: 25, 4: 10, 5: 3, 6: 1, 7: 1
+    }
+    
     with SessionLocal() as s:
         for m in s.query(Market).all():
-            # Different pricing logic for Fed cut markets
             if m.ticker.startswith("KXRATECUTCOUNT"):
                 try:
                     cuts = int(m.ticker.split('-')[-1])
-                    # Price based on number of cuts (fewer cuts = higher NO price)
-                    base_yes = max(10, 70 - (cuts * 10))  # More cuts = lower probability
-                    yes_price = base_yes + random.randint(-5, 5)
-                    yes_price = max(5, min(95, yes_price))
+                    
+                    # Base probability with some random variation
+                    base_yes = base_probabilities.get(cuts, 5)
+                    variation = random.randint(-3, 3)
+                    yes_price = max(5, min(95, base_yes + variation))
                     no_price = 100 - yes_price
                     
-                    # Higher volume for more likely scenarios (1-3 cuts)
+                    # Higher volume for more likely scenarios
                     if 1 <= cuts <= 3:
-                        vol = random.randint(500, 5000)
+                        vol = random.randint(2000, 10000)
+                        spread = 1
+                    elif cuts in [0, 4]:
+                        vol = random.randint(500, 2000)
+                        spread = 2
                     else:
-                        vol = random.randint(100, 1000)
-                    
-                    # Tighter spreads for higher volume markets
-                    spread = 1 if vol > 2000 else 2 if vol > 500 else 3
+                        vol = random.randint(100, 500)
+                        spread = 3
                     
                     s.add(Quote(
                         ticker=m.ticker, 
                         ts=now, 
                         yes_last=yes_price, 
                         no_last=no_price,
-                        yes_bid=yes_price - spread,
-                        yes_ask=yes_price + spread,
-                        no_bid=no_price - spread,
-                        no_ask=no_price + spread,
+                        yes_bid=max(1, yes_price - spread),
+                        yes_ask=min(99, yes_price + spread),
+                        no_bid=max(1, no_price - spread),
+                        no_ask=min(99, no_price + spread),
                         volume=vol
                     ))
                 except:
@@ -375,7 +525,6 @@ def pull_once():
 async def pull_loop():
     while True:
         pull_once()
-        # Broadcast updates
         with SessionLocal() as s:
             out = []
             for m in s.query(Market).all():
