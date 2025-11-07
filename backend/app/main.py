@@ -69,7 +69,7 @@ async def fetch_and_store_markets():
             return await fetch_mock_data()
         
         # Get open markets
-        markets = await kalshi_client.get_markets({"limit": 10, "mve_filter": "exclude"})
+        markets = await kalshi_client.get_markets({"limit": 100, "mve_filter": "exclude", "status": "open"})
         
         # Filter out complex multi-game markets that might not have standard orderbooks
         # filtered_markets = [
