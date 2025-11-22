@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import math
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
@@ -10,13 +11,25 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from sqlalchemy import create_engine, Column, String, Integer, BigInteger, DateTime, ForeignKey, select, func, text
+from sqlalchemy import create_engine, Column, String, Integer, Float, BigInteger, DateTime, ForeignKey, select, func
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, mapped_column, Mapped
+
+# Import Kalshi client if available
+try:
+    from app.kalshi_client import KalshiClient
+    KALSHI_AVAILABLE = True
+except ImportError:
+    KALSHI_AVAILABLE = False
+    print("Warning: Kalshi client not available, using mock data")
 
 # ---------- Config ----------
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dev.db")
-PULL_INTERVAL_SECONDS = int(os.getenv("PULL_INTERVAL_SECONDS", "15"))
+PULL_INTERVAL_SECONDS = int(os.getenv("PULL_INTERVAL_SECONDS", "30"))
+
+# Kalshi API credentials (from Railway environment)
+KALSHI_API_KEY = os.getenv("KALSHI_API_KEY")
+KALSHI_PRIVATE_KEY = os.getenv("KALSHI_PRIVATE_KEY")
 
 # ---------- DB setup ----------
 class Base(DeclarativeBase):
@@ -28,6 +41,9 @@ class Market(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_update: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Fed-specific fields
+    rate_cuts: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_fed_market: Mapped[Optional[bool]] = mapped_column(Integer, nullable=True, default=False)
 
 class Quote(Base):
     __tablename__ = "quotes"
@@ -47,41 +63,20 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
-    
-    # Add new columns if they don't exist (safe migration)
-    with engine.connect() as conn:
-        # Check if rate_cuts column exists
-        try:
-            result = conn.execute(text("SELECT rate_cuts FROM markets LIMIT 1"))
-            result.close()
-        except:
-            try:
-                conn.execute(text("ALTER TABLE markets ADD COLUMN rate_cuts INTEGER"))
-                conn.commit()
-            except:
-                pass  # Column might already exist or DB doesn't support ALTER
-        
-        # Check if expiry_date column exists  
-        try:
-            result = conn.execute(text("SELECT expiry_date FROM markets LIMIT 1"))
-            result.close()
-        except:
-            try:
-                conn.execute(text("ALTER TABLE markets ADD COLUMN expiry_date TIMESTAMP"))
-                conn.commit()
-            except:
-                pass  # Column might already exist or DB doesn't support ALTER
+
+# ---------- Kalshi Client Setup ----------
+kalshi_client = None
+if KALSHI_AVAILABLE and KALSHI_API_KEY and KALSHI_PRIVATE_KEY:
+    kalshi_client = KalshiClient(KALSHI_API_KEY, KALSHI_PRIVATE_KEY)
+    print("Kalshi client initialized")
 
 # ---------- App ----------
-app = FastAPI(title="Kalshi Pipeline API", version="0.1.0")
-
-# origins = [o.strip() for o in os.getenv("FRONTEND_ORIGINS", "*").split(",") if o.strip()]
-# allow_all = "*" in origins or not origins
+app = FastAPI(title="Kalshi Mortgage Hedge API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],         # TEMP: allow all to verify
-    allow_credentials=False,     # keep False for SSE simplicity
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -90,7 +85,6 @@ app.add_middleware(
 _subscribers: List[asyncio.Queue] = []
 
 async def broadcast(payload: Dict[str, Any]):
-    # push to all subscribers
     for q in list(_subscribers):
         try:
             await q.put(payload)
@@ -113,16 +107,9 @@ async def stream():
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
 # ---------- Schemas ----------
-class MarketOut(BaseModel):
+class FedMarket(BaseModel):
     ticker: str
     title: str
-    category: Optional[str] = None
-    last_update: Optional[datetime] = None
-    yes_price: Optional[int] = 0
-    no_price: Optional[int] = 0
-    volume_24h: Optional[int] = 0
-
-class FedRateMarket(BaseModel):
     cuts: int
     probability: float
     price: int
@@ -131,32 +118,290 @@ class FedRateMarket(BaseModel):
     no_bid: int
     no_ask: int
     volume: int
-    ticker: str
-    title: str
 
 class HedgeRequest(BaseModel):
     loan_amount: float
     current_rate: float
     refinance_threshold: float
     refinance_cost: float
-    hedge_amount: float
+    strategy_type: str = 'probability-weighted'
+    fed_markets: Optional[List[Dict[str, Any]]] = None
 
 class HedgeResponse(BaseModel):
-    potential_loss: float
+    yearly_opportunity_cost: float
+    optimal_hedge_amount: float
     cuts_to_refinance: int
-    strategies: List[Dict[str, Any]]
-    scenarios: Dict[str, Any]
+    allocations: List[Dict[str, Any]]
+    total_hedge_cost: float
     expected_value: float
+
+# ---------- Helper Functions ----------
+def extract_rate_cuts(title: str, ticker: str) -> int:
+    """Extract number of rate cuts from market title or ticker"""
+    title_lower = title.lower()
+    ticker_lower = ticker.lower()
+    
+    # Check for explicit numbers in title
+    if "no cut" in title_lower or "zero cut" in title_lower or "0 cut" in title_lower:
+        return 0
+    elif "one cut" in title_lower or "1 cut" in title_lower or "exactly 1" in title_lower:
+        return 1
+    elif "two cut" in title_lower or "2 cut" in title_lower or "exactly 2" in title_lower:
+        return 2
+    elif "three cut" in title_lower or "3 cut" in title_lower or "exactly 3" in title_lower:
+        return 3
+    elif "four cut" in title_lower or "4 cut" in title_lower or "exactly 4" in title_lower:
+        return 4
+    elif "five cut" in title_lower or "5 cut" in title_lower or "exactly 5" in title_lower:
+        return 5
+    elif "six cut" in title_lower or "6 cut" in title_lower or "exactly 6" in title_lower:
+        return 6
+    
+    # Check ticker patterns (e.g., FEDZ24-2 for 2 cuts)
+    if "-" in ticker:
+        parts = ticker.split("-")
+        if len(parts) > 1 and parts[-1].isdigit():
+            return int(parts[-1])
+    
+    # Default to 0 if uncertain
+    return 0
+
+def is_fed_rate_market(title: str, ticker: str) -> bool:
+    """Determine if a market is a Fed rate cut market"""
+    title_lower = title.lower()
+    ticker_lower = ticker.lower()
+    
+    fed_keywords = ["fed", "fomc", "rate cut", "federal reserve", "basis point", "bp cut"]
+    return any(keyword in title_lower for keyword in fed_keywords) or "fed" in ticker_lower
 
 # ---------- Routes ----------
 @app.get("/health")
 def health():
-    return {"ok": True, "time": datetime.now(timezone.utc).isoformat()}
+    return {
+        "ok": True, 
+        "time": datetime.now(timezone.utc).isoformat(),
+        "kalshi_connected": kalshi_client is not None
+    }
 
-@app.get("/markets", response_model=List[MarketOut])
-def get_markets():
+@app.get("/api/fed-markets", response_model=List[FedMarket])
+async def get_fed_markets():
+    """Get all Fed rate cut markets with live data"""
+    
+    fed_markets = []
+    
     with SessionLocal() as s:
-        # latest quote per ticker
+        # Get all Fed markets from database
+        markets = s.execute(
+            select(Market).where(Market.is_fed_market == True)
+        ).scalars().all()
+        
+        for market in markets:
+            # Get latest quote
+            latest = s.execute(
+                select(Quote)
+                .where(Quote.ticker == market.ticker)
+                .order_by(Quote.ts.desc())
+                .limit(1)
+            ).scalars().first()
+            
+            if latest:
+                cuts = market.rate_cuts or extract_rate_cuts(market.title, market.ticker)
+                probability = latest.yes_last / 100.0 if latest.yes_last else 0
+                
+                fed_markets.append(FedMarket(
+                    ticker=market.ticker,
+                    title=market.title,
+                    cuts=cuts,
+                    probability=probability,
+                    price=latest.yes_last or 0,
+                    yes_bid=latest.yes_bid or 0,
+                    yes_ask=latest.yes_ask or 0,
+                    no_bid=latest.no_bid or 0,
+                    no_ask=latest.no_ask or 0,
+                    volume=latest.volume or 0
+                ))
+    
+    # If no Fed markets in DB, return mock data
+    if not fed_markets:
+        fed_markets = [
+            FedMarket(ticker="FEDZ24", title="No Fed cuts by Dec 2025", cuts=0, probability=0.10, 
+                     price=10, yes_bid=9, yes_ask=11, no_bid=89, no_ask=91, volume=50000),
+            FedMarket(ticker="FEDZ24-1", title="Exactly 1 Fed cut by Dec 2025", cuts=1, probability=0.20,
+                     price=20, yes_bid=19, yes_ask=21, no_bid=79, no_ask=81, volume=75000),
+            FedMarket(ticker="FEDZ24-2", title="Exactly 2 Fed cuts by Dec 2025", cuts=2, probability=0.30,
+                     price=30, yes_bid=29, yes_ask=31, no_bid=69, no_ask=71, volume=100000),
+            FedMarket(ticker="FEDZ24-3", title="Exactly 3 Fed cuts by Dec 2025", cuts=3, probability=0.25,
+                     price=25, yes_bid=24, yes_ask=26, no_bid=74, no_ask=76, volume=60000),
+            FedMarket(ticker="FEDZ24-4", title="4 or more Fed cuts by Dec 2025", cuts=4, probability=0.10,
+                     price=10, yes_bid=9, yes_ask=11, no_bid=89, no_ask=91, volume=30000),
+            FedMarket(ticker="FEDZ24-5", title="5 or more Fed cuts by Dec 2025", cuts=5, probability=0.05,
+                     price=5, yes_bid=4, yes_ask=6, no_bid=94, no_ask=96, volume=15000),
+        ]
+    
+    # Sort by number of cuts
+    fed_markets.sort(key=lambda m: m.cuts)
+    
+    return fed_markets
+
+@app.post("/api/calculate-hedge", response_model=HedgeResponse)
+def calculate_hedge(request: HedgeRequest):
+    """Calculate optimal hedge strategy based on mortgage details"""
+    
+    # Constants
+    KALSHI_FEE_RATE = 0.07  # 7 cents per dollar
+    FEE_ADJUSTMENT = 1.1
+    
+    # Get Fed markets from request or fetch them
+    if request.fed_markets:
+        fed_markets = request.fed_markets
+    else:
+        # Fetch current Fed markets
+        fed_markets = asyncio.run(get_fed_markets())
+        fed_markets = [m.dict() for m in fed_markets]
+    
+    # Calculate cuts needed to refinance
+    rate_diff = request.current_rate - request.refinance_threshold
+    cuts_to_refinance = math.ceil(rate_diff / 0.25)
+    
+    # Calculate yearly opportunity cost
+    r1 = request.current_rate / 100 / 12
+    r2 = request.refinance_threshold / 100 / 12
+    n = 30 * 12
+    
+    current_payment = request.loan_amount * (r1 * pow(1 + r1, n)) / (pow(1 + r1, n) - 1)
+    refi_payment = request.loan_amount * (r2 * pow(1 + r2, n)) / (pow(1 + r2, n) - 1)
+    
+    monthly_savings = current_payment - refi_payment
+    yearly_opportunity_cost = monthly_savings * 12
+    
+    # Calculate optimal hedge amount
+    optimal_hedge_amount = yearly_opportunity_cost * FEE_ADJUSTMENT
+    
+    # Get eligible markets (only bet on scenarios where we DON'T refinance)
+    eligible_markets = [m for m in fed_markets if m.get('cuts', 0) < cuts_to_refinance]
+    total_probability = sum(m.get('probability', m.get('price', 0)/100) for m in eligible_markets)
+    
+    # Calculate allocations based on strategy
+    allocations = []
+    
+    if request.strategy_type == 'probability-weighted':
+        for market in eligible_markets:
+            prob = market.get('probability', market.get('price', 0)/100)
+            weight = prob / total_probability if total_probability > 0 else 0
+            allocation = optimal_hedge_amount * weight
+            
+            price_per_contract = market.get('price', 0) / 100
+            contracts = int(allocation / price_per_contract) if price_per_contract > 0 else 0
+            
+            if contracts > 0:
+                cost = contracts * price_per_contract
+                fees = contracts * KALSHI_FEE_RATE
+                payout = contracts * 1.0
+                net_profit = payout - cost - fees
+                
+                allocations.append({
+                    'cuts': market.get('cuts', 0),
+                    'probability': prob,
+                    'price': market.get('price', 0),
+                    'ticker': market.get('ticker', ''),
+                    'title': market.get('title', ''),
+                    'allocation': allocation,
+                    'weight': weight,
+                    'contracts': contracts,
+                    'cost': cost,
+                    'fees': fees,
+                    'payout': payout,
+                    'netProfit': net_profit,
+                    'kalshiUrl': f"https://kalshi.com/markets/{market.get('ticker', '')}"
+                })
+    
+    elif request.strategy_type == 'max-protection':
+        if eligible_markets:
+            most_likely = max(eligible_markets, key=lambda m: m.get('probability', m.get('price', 0)/100))
+            most_likely_prob = most_likely.get('probability', most_likely.get('price', 0)/100)
+            
+            for market in eligible_markets:
+                if market == most_likely:
+                    weight = 0.6
+                else:
+                    other_prob = total_probability - most_likely_prob
+                    prob = market.get('probability', market.get('price', 0)/100)
+                    weight = 0.4 * (prob / other_prob) if other_prob > 0 else 0
+                
+                allocation = optimal_hedge_amount * weight
+                price_per_contract = market.get('price', 0) / 100
+                contracts = int(allocation / price_per_contract) if price_per_contract > 0 else 0
+                
+                if contracts > 0:
+                    cost = contracts * price_per_contract
+                    fees = contracts * KALSHI_FEE_RATE
+                    payout = contracts * 1.0
+                    net_profit = payout - cost - fees
+                    
+                    allocations.append({
+                        'cuts': market.get('cuts', 0),
+                        'probability': market.get('probability', market.get('price', 0)/100),
+                        'price': market.get('price', 0),
+                        'ticker': market.get('ticker', ''),
+                        'title': market.get('title', ''),
+                        'allocation': allocation,
+                        'weight': weight,
+                        'contracts': contracts,
+                        'cost': cost,
+                        'fees': fees,
+                        'payout': payout,
+                        'netProfit': net_profit,
+                        'kalshiUrl': f"https://kalshi.com/markets/{market.get('ticker', '')}"
+                    })
+    
+    elif request.strategy_type == 'equal':
+        if eligible_markets:
+            weight = 1.0 / len(eligible_markets)
+            allocation = optimal_hedge_amount * weight
+            
+            for market in eligible_markets:
+                price_per_contract = market.get('price', 0) / 100
+                contracts = int(allocation / price_per_contract) if price_per_contract > 0 else 0
+                
+                if contracts > 0:
+                    cost = contracts * price_per_contract
+                    fees = contracts * KALSHI_FEE_RATE
+                    payout = contracts * 1.0
+                    net_profit = payout - cost - fees
+                    
+                    allocations.append({
+                        'cuts': market.get('cuts', 0),
+                        'probability': market.get('probability', market.get('price', 0)/100),
+                        'price': market.get('price', 0),
+                        'ticker': market.get('ticker', ''),
+                        'title': market.get('title', ''),
+                        'allocation': allocation,
+                        'weight': weight,
+                        'contracts': contracts,
+                        'cost': cost,
+                        'fees': fees,
+                        'payout': payout,
+                        'netProfit': net_profit,
+                        'kalshiUrl': f"https://kalshi.com/markets/{market.get('ticker', '')}"
+                    })
+    
+    # Calculate total hedge cost and expected value
+    total_hedge_cost = sum(a['cost'] + a['fees'] for a in allocations)
+    expected_value = sum(a['probability'] * a['netProfit'] for a in allocations)
+    
+    return HedgeResponse(
+        yearly_opportunity_cost=yearly_opportunity_cost,
+        optimal_hedge_amount=optimal_hedge_amount,
+        cuts_to_refinance=cuts_to_refinance,
+        allocations=allocations,
+        total_hedge_cost=total_hedge_cost,
+        expected_value=expected_value
+    )
+
+@app.get("/markets")
+def get_all_markets():
+    """Get all markets (for compatibility)"""
+    with SessionLocal() as s:
         subq = (
             select(Quote.ticker, func.max(Quote.ts).label("max_ts"))
             .group_by(Quote.ticker)
@@ -165,8 +410,7 @@ def get_markets():
         q = (
             select(
                 Market.ticker, Market.title, Market.category, Market.last_update,
-                Quote.yes_last, Quote.no_last,
-                Quote.volume
+                Quote.yes_last, Quote.no_last, Quote.volume
             )
             .join(subq, subq.c.ticker == Market.ticker, isouter=True)
             .join(Quote, (Quote.ticker == subq.c.ticker) & (Quote.ts == subq.c.max_ts), isouter=True)
@@ -176,362 +420,214 @@ def get_markets():
         out = []
         for row in rows:
             ticker, title, category, last_update, yes_last, no_last, volume = row
-            out.append(
-                MarketOut(
-                    ticker=ticker, title=title, category=category, last_update=last_update,
-                    yes_price=yes_last or 0, no_price=no_last or 0, volume_24h=volume or 0
-                ).model_dump()
-            )
+            out.append({
+                "ticker": ticker,
+                "title": title,
+                "category": category,
+                "last_update": last_update.isoformat() if last_update else None,
+                "yes_price": yes_last or 0,
+                "no_price": no_last or 0,
+                "volume_24h": volume or 0
+            })
         return out
 
-@app.get("/markets/{ticker}")
-def get_market_detail(ticker: str):
-    with SessionLocal() as s:
-        m = s.get(Market, ticker)
-        if not m:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        q = (
-            select(Quote.ts, Quote.yes_last, Quote.no_last, Quote.volume)
-            .where(Quote.ticker == ticker)
-            .order_by(Quote.ts.desc())
-            .limit(500)
-        )
-        rows = s.execute(q).all()
-        return {
-            "ticker": ticker,
-            "title": m.title,
-            "category": m.category,
-            "series": [{"ts": ts.isoformat(), "yes": y or 0, "no": n or 0, "vol": v or 0} for ts, y, n, v in rows[::-1]]
-        }
-
-@app.get("/fed-rates", response_model=List[FedRateMarket])
-def get_fed_rate_markets():
-    """Get all Fed rate cut markets"""
-    with SessionLocal() as s:
-        # Get all markets in Fed category
-        markets = s.execute(
-            select(Market).where(Market.category == "Fed")
-        ).scalars().all()
+# ---------- Background Data Puller ----------
+async def pull_kalshi_data():
+    """Pull live data from Kalshi API"""
+    if not kalshi_client:
+        print("Kalshi client not available, using mock data")
+        return
+    
+    try:
+        # Fetch all markets
+        markets = await kalshi_client.get_markets(limit=200)
         
-        result = []
-        for m in markets:
-            # Get latest quote
-            latest = s.execute(
-                select(Quote).where(Quote.ticker == m.ticker).order_by(Quote.ts.desc()).limit(1)
-            ).scalars().first()
-            
-            if latest:
-                # Extract number of cuts from title
-                cuts = _extract_cuts_from_title(m.title)
+        with SessionLocal() as s:
+            for market_data in markets:
+                ticker = market_data.get('ticker')
+                title = market_data.get('title', '')
                 
-                result.append(FedRateMarket(
-                    cuts=cuts,
-                    probability=latest.yes_last / 100.0 if latest.yes_last else 0,
-                    price=latest.yes_last or 0,
-                    yes_bid=latest.yes_bid or max(0, (latest.yes_last or 0) - 1),
-                    yes_ask=latest.yes_ask or min(100, (latest.yes_last or 0) + 1),
-                    no_bid=latest.no_bid or max(0, (latest.no_last or 0) - 1),
-                    no_ask=latest.no_ask or min(100, (latest.no_last or 0) + 1),
-                    volume=latest.volume or 0,
-                    ticker=m.ticker,
-                    title=m.title
-                ))
-        
-        # Sort by number of cuts
-        result.sort(key=lambda x: x.cuts)
-        return result
-
-@app.post("/calculate-hedge", response_model=HedgeResponse)
-def calculate_hedge(request: HedgeRequest):
-    """Calculate optimal hedge strategy"""
-    
-    # Get Fed rate markets
-    with SessionLocal() as s:
-        markets = s.execute(
-            select(Market).where(Market.category == "Fed")
-        ).scalars().all()
-        
-        market_data = []
-        for m in markets:
-            latest = s.execute(
-                select(Quote).where(Quote.ticker == m.ticker).order_by(Quote.ts.desc()).limit(1)
-            ).scalars().first()
-            
-            if latest:
-                cuts = _extract_cuts_from_title(m.title)
-                market_data.append({
-                    'cuts': cuts,
-                    'probability': latest.yes_last / 100.0 if latest.yes_last else 0,
-                    'price': latest.yes_last or 0,
-                    'ticker': m.ticker
-                })
-    
-    # If no Fed markets exist, use sample data
-    if not market_data:
-        market_data = [
-            {'cuts': 0, 'probability': 0.15, 'price': 15, 'ticker': 'FED-NOCUT'},
-            {'cuts': 1, 'probability': 0.25, 'price': 25, 'ticker': 'FED-1CUT'},
-            {'cuts': 2, 'probability': 0.30, 'price': 30, 'ticker': 'FED-2CUT'},
-            {'cuts': 3, 'probability': 0.20, 'price': 20, 'ticker': 'FED-3CUT'},
-            {'cuts': 4, 'probability': 0.07, 'price': 7, 'ticker': 'FED-4CUT'},
-        ]
-    
-    # Sort by cuts
-    market_data.sort(key=lambda x: x['cuts'])
-    
-    # Calculate cuts needed to refinance
-    rate_diff = request.current_rate - request.refinance_threshold
-    cuts_to_refinance = max(0, int(rate_diff / 0.25))
-    
-    # Calculate potential loss (simplified)
-    r1 = request.current_rate / 100 / 12
-    r2 = request.refinance_threshold / 100 / 12
-    n = 30 * 12
-    
-    payment1 = request.loan_amount * (r1 * pow(1 + r1, n)) / (pow(1 + r1, n) - 1)
-    payment2 = request.loan_amount * (r2 * pow(1 + r2, n)) / (pow(1 + r2, n) - 1)
-    monthly_savings = payment1 - payment2
-    potential_loss = monthly_savings * 12 * 5  # 5 years of savings
-    
-    # Calculate hedge strategies
-    strategies = []
-    total_hedge_cost = 0
-    
-    KALSHI_FEE = 0.07  # 7 cents total per contract
-    
-    for market in market_data:
-        if market['cuts'] < cuts_to_refinance:
-            price_per_contract = market['price'] / 100
-            contracts_needed = int(request.hedge_amount / price_per_contract) if price_per_contract > 0 else 0
-            
-            if contracts_needed > 0:
-                total_cost = contracts_needed * price_per_contract
-                fees = contracts_needed * KALSHI_FEE
-                payout = contracts_needed * 1.0
-                net_profit = payout - total_cost - fees
+                # Check if it's a Fed market
+                is_fed = is_fed_rate_market(title, ticker)
+                rate_cuts = extract_rate_cuts(title, ticker) if is_fed else None
                 
-                strategies.append({
-                    'cuts': market['cuts'],
-                    'probability': market['probability'],
-                    'price': market['price'],
-                    'contracts': contracts_needed,
-                    'cost': total_cost,
-                    'fees': fees,
-                    'payout': payout,
-                    'net_profit': net_profit,
-                    'ticker': market['ticker']
-                })
-                
-                total_hedge_cost += total_cost + fees
-    
-    # Calculate scenarios
-    no_refi_prob = sum(s['probability'] for s in strategies) if strategies else 0.5
-    refi_prob = 1 - no_refi_prob
-    
-    expected_hedge_value = sum(s['probability'] * s['net_profit'] for s in strategies) if strategies else 0
-    expected_refi_value = refi_prob * (potential_loss - request.refinance_cost - total_hedge_cost)
-    total_expected_value = expected_hedge_value + expected_refi_value
-    
-    scenarios = {
-        'no_refinance': {
-            'probability': no_refi_prob,
-            'expected_profit': expected_hedge_value,
-            'outcomes': strategies
-        },
-        'refinance': {
-            'probability': refi_prob,
-            'hedge_loss': -total_hedge_cost,
-            'refinance_savings': potential_loss - request.refinance_cost,
-            'net_outcome': potential_loss - request.refinance_cost - total_hedge_cost
-        },
-        'hedge_cost': total_hedge_cost,
-        'expected_hedge_value': expected_hedge_value,
-        'expected_refi_value': expected_refi_value,
-        'total_expected_value': total_expected_value
-    }
-    
-    return HedgeResponse(
-        potential_loss=potential_loss,
-        cuts_to_refinance=cuts_to_refinance,
-        strategies=strategies,
-        scenarios=scenarios,
-        expected_value=total_expected_value
-    )
-
-def _extract_cuts_from_title(title: str) -> int:
-    """Extract number of rate cuts from market title"""
-    # Simple extraction - in production, use regex or NLP
-    title_lower = title.lower()
-    if "no cut" in title_lower or "0 cut" in title_lower or "zero cut" in title_lower:
-        return 0
-    elif "1 cut" in title_lower or "one cut" in title_lower or "exactly 1" in title_lower:
-        return 1
-    elif "2 cut" in title_lower or "two cut" in title_lower or "exactly 2" in title_lower:
-        return 2
-    elif "3 cut" in title_lower or "three cut" in title_lower or "exactly 3" in title_lower:
-        return 3
-    elif "4 cut" in title_lower or "four cut" in title_lower or "exactly 4" in title_lower:
-        return 4
-    elif "5 cut" in title_lower or "five cut" in title_lower or "exactly 5" in title_lower:
-        return 5
-    elif "6 cut" in title_lower or "six cut" in title_lower:
-        return 6
-    else:
-        return 0
-
-# ---------- Background puller (stub that simulates data without Kalshi creds) ----------
-import random
-
-def _seed_if_empty():
-    with SessionLocal() as s:
-        # Check if any markets exist
-        market_count = s.execute(select(func.count()).select_from(Market)).scalar()
-        
-        if market_count == 0:
-            # Seed Fed rate cut markets
-            fed_markets = [
-                Market(
-                    ticker="FED-NOCUT-2025", 
-                    title="Fed makes no rate cuts by end of 2025", 
-                    category="Fed",
-                    last_update=datetime.now(timezone.utc)
-                ),
-                Market(
-                    ticker="FED-1CUT-2025", 
-                    title="Fed makes exactly 1 rate cut by end of 2025", 
-                    category="Fed",
-                    last_update=datetime.now(timezone.utc)
-                ),
-                Market(
-                    ticker="FED-2CUT-2025", 
-                    title="Fed makes exactly 2 rate cuts by end of 2025", 
-                    category="Fed",
-                    last_update=datetime.now(timezone.utc)
-                ),
-                Market(
-                    ticker="FED-3CUT-2025", 
-                    title="Fed makes exactly 3 rate cuts by end of 2025", 
-                    category="Fed",
-                    last_update=datetime.now(timezone.utc)
-                ),
-                Market(
-                    ticker="FED-4CUT-2025", 
-                    title="Fed makes 4 or more rate cuts by end of 2025", 
-                    category="Fed",
-                    last_update=datetime.now(timezone.utc)
-                ),
-            ]
-            
-            # Add other original sample markets
-            other_markets = [
-                Market(
-                    ticker="RATE-CUT-DEC", 
-                    title="Fed cuts rates in December?", 
-                    category="Fed",
-                    last_update=datetime.now(timezone.utc)
-                ),
-                Market(
-                    ticker="POTUS-2024", 
-                    title="Who wins the 2024 U.S. Presidential Election?", 
-                    category="Politics",
-                    last_update=datetime.now(timezone.utc)
-                ),
-            ]
-            
-            s.add_all(fed_markets + other_markets)
-            s.commit()
-
-def pull_once():
-    # In production: call Kalshi API here and upsert
-    # For now, simulate quotes to prove end-to-end
-    now = datetime.now(timezone.utc)
-    with SessionLocal() as s:
-        # Get all markets using the new approach
-        markets = s.execute(select(Market)).scalars().all()
-        
-        for m in markets:
-            if m.category == "Fed" and "exactly" in m.title.lower():
-                # Realistic Fed rate probabilities for specific cut markets
-                if "no rate" in m.title.lower() or "0 cut" in m.title.lower():
-                    y = random.randint(12, 18)  # 12-18% for no cuts
-                elif "1 rate" in m.title.lower() or "1 cut" in m.title.lower():
-                    y = random.randint(22, 28)  # 22-28% for 1 cut
-                elif "2 rate" in m.title.lower() or "2 cut" in m.title.lower():
-                    y = random.randint(28, 35)  # 28-35% for 2 cuts
-                elif "3 rate" in m.title.lower() or "3 cut" in m.title.lower():
-                    y = random.randint(18, 25)  # 18-25% for 3 cuts
+                # Upsert market
+                market = s.get(Market, ticker)
+                if not market:
+                    market = Market(
+                        ticker=ticker,
+                        title=title,
+                        category="Fed" if is_fed else market_data.get('category', 'General'),
+                        is_fed_market=is_fed,
+                        rate_cuts=rate_cuts,
+                        last_update=datetime.now(timezone.utc)
+                    )
+                    s.add(market)
                 else:
-                    y = random.randint(5, 10)   # 5-10% for 4+ cuts
+                    market.title = title
+                    market.is_fed_market = is_fed
+                    market.rate_cuts = rate_cuts
+                    market.last_update = datetime.now(timezone.utc)
                 
-                # Add some volatility
-                y = max(1, min(99, y + random.randint(-2, 2)))
-                n = 100 - y
+                # Get latest quote data
+                orderbook = await kalshi_client.get_orderbook(ticker)
                 
-                # Realistic bid/ask spreads
-                spread = random.randint(1, 3)
-                yes_bid = max(1, y - spread)
-                yes_ask = min(99, y + spread)
-                no_bid = max(1, n - spread)
-                no_ask = min(99, n + spread)
+                # Extract bid/ask prices
+                yes_side = orderbook.get('yes', [])
+                no_side = orderbook.get('no', [])
                 
-                vol = random.randint(1000, 50000)  # Higher volume for Fed markets
+                yes_bid = yes_side[0]['price'] if yes_side else 0
+                yes_ask = yes_side[-1]['price'] if yes_side else 0
+                no_bid = no_side[0]['price'] if no_side else 0
+                no_ask = no_side[-1]['price'] if no_side else 0
                 
-                s.add(Quote(
-                    ticker=m.ticker, 
-                    ts=now, 
-                    yes_last=y, 
-                    no_last=n,
+                # Get last trade price
+                trades = await kalshi_client.get_trades(ticker, limit=1)
+                yes_last = trades[0]['yes_price'] if trades else yes_bid
+                no_last = trades[0]['no_price'] if trades else no_bid
+                volume = market_data.get('volume', 0)
+                
+                # Add quote
+                quote = Quote(
+                    ticker=ticker,
+                    ts=datetime.now(timezone.utc),
                     yes_bid=yes_bid,
                     yes_ask=yes_ask,
                     no_bid=no_bid,
                     no_ask=no_ask,
-                    volume=vol
-                ))
-            else:
-                # Regular markets or general Fed questions
-                y = random.randint(30, 70)
-                n = 100 - y
-                vol = random.randint(0, 5000)
-                s.add(Quote(
-                    ticker=m.ticker, 
-                    ts=now, 
-                    yes_last=y, 
-                    no_last=n, 
-                    volume=vol
-                ))
+                    yes_last=yes_last,
+                    no_last=no_last,
+                    volume=volume
+                )
+                s.add(quote)
             
-            m.last_update = now
+            s.commit()
+            
+        # Broadcast Fed market updates
+        fed_markets = await get_fed_markets()
+        await broadcast({
+            'type': 'fed-update',
+            'markets': [m.dict() for m in fed_markets],
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        })
+        
+    except Exception as e:
+        print(f"Error pulling Kalshi data: {e}")
+
+# ---------- Mock Data Generator (Fallback) ----------
+import random
+
+def generate_mock_data():
+    """Generate mock Fed market data when Kalshi API is not available"""
+    with SessionLocal() as s:
+        # Check if we have Fed markets
+        fed_count = s.execute(
+            select(func.count()).select_from(Market).where(Market.is_fed_market == True)
+        ).scalar()
+        
+        if fed_count == 0:
+            # Create mock Fed markets
+            fed_markets = [
+                Market(ticker="FEDZ24", title="No Fed cuts by Dec 2025", category="Fed", 
+                      is_fed_market=True, rate_cuts=0),
+                Market(ticker="FEDZ24-1", title="Exactly 1 Fed cut by Dec 2025", category="Fed",
+                      is_fed_market=True, rate_cuts=1),
+                Market(ticker="FEDZ24-2", title="Exactly 2 Fed cuts by Dec 2025", category="Fed",
+                      is_fed_market=True, rate_cuts=2),
+                Market(ticker="FEDZ24-3", title="Exactly 3 Fed cuts by Dec 2025", category="Fed",
+                      is_fed_market=True, rate_cuts=3),
+                Market(ticker="FEDZ24-4", title="4 or more Fed cuts by Dec 2025", category="Fed",
+                      is_fed_market=True, rate_cuts=4),
+                Market(ticker="FEDZ24-5", title="5 or more Fed cuts by Dec 2025", category="Fed",
+                      is_fed_market=True, rate_cuts=5),
+            ]
+            s.add_all(fed_markets)
+            s.commit()
+        
+        # Generate realistic quotes for Fed markets
+        markets = s.execute(
+            select(Market).where(Market.is_fed_market == True)
+        ).scalars().all()
+        
+        for market in markets:
+            # Generate realistic probabilities based on cuts
+            if market.rate_cuts == 0:
+                yes_price = random.randint(8, 15)
+            elif market.rate_cuts == 1:
+                yes_price = random.randint(18, 25)
+            elif market.rate_cuts == 2:
+                yes_price = random.randint(25, 35)
+            elif market.rate_cuts == 3:
+                yes_price = random.randint(20, 30)
+            elif market.rate_cuts == 4:
+                yes_price = random.randint(8, 15)
+            else:
+                yes_price = random.randint(3, 8)
+            
+            # Add some volatility
+            yes_price = max(1, min(99, yes_price + random.randint(-2, 2)))
+            no_price = 100 - yes_price
+            
+            # Generate bid/ask spread
+            spread = random.randint(1, 2)
+            yes_bid = max(1, yes_price - spread)
+            yes_ask = min(99, yes_price + spread)
+            no_bid = max(1, no_price - spread)
+            no_ask = min(99, no_price + spread)
+            
+            # Generate volume
+            volume = random.randint(10000, 100000)
+            
+            quote = Quote(
+                ticker=market.ticker,
+                ts=datetime.now(timezone.utc),
+                yes_bid=yes_bid,
+                yes_ask=yes_ask,
+                no_bid=no_bid,
+                no_ask=no_ask,
+                yes_last=yes_price,
+                no_last=no_price,
+                volume=volume
+            )
+            s.add(quote)
+            
+            market.last_update = datetime.now(timezone.utc)
+        
         s.commit()
 
 async def pull_loop():
+    """Main loop for pulling data"""
     while True:
-        pull_once()
-        # broadcast a compact patch for the UI
-        with SessionLocal() as s:
-            out = []
-            markets = s.execute(select(Market)).scalars().all()
-            for m in markets:
-                # get latest quote for ticker m
-                latest = s.execute(
-                    select(Quote).where(Quote.ticker == m.ticker).order_by(Quote.ts.desc()).limit(1)
-                ).scalars().first()
-                if latest:
-                    out.append({
-                        "ticker": m.ticker,
-                        "yes_price": latest.yes_last,
-                        "no_price": latest.no_last,
-                        "volume_24h": latest.volume
-                    })
-        await broadcast({"type": "upsert", "markets": out, "ts": datetime.now(timezone.utc).isoformat()})
+        if kalshi_client:
+            await pull_kalshi_data()
+        else:
+            generate_mock_data()
+            
+            # Broadcast mock Fed market updates
+            fed_markets = await get_fed_markets()
+            await broadcast({
+                'type': 'fed-update',
+                'markets': [m.dict() for m in fed_markets],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+        
         await asyncio.sleep(PULL_INTERVAL_SECONDS)
 
-# ---------- Lifespan ----------
+# ---------- Startup ----------
 @app.on_event("startup")
 async def on_startup():
     init_db()
-    _seed_if_empty()
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(pull_once, "interval", seconds=PULL_INTERVAL_SECONDS)
-    scheduler.start()
-    # Also kick off an async loop that broadcasts to SSE
+    
+    # Initialize with mock data if no Kalshi connection
+    if not kalshi_client:
+        generate_mock_data()
+    
+    # Start background data puller
     asyncio.create_task(pull_loop())
+    
+    print(f"Server started. Kalshi connected: {kalshi_client is not None}")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if kalshi_client:
+        kalshi_client.close()
