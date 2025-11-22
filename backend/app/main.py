@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from sqlalchemy import create_engine, Column, String, Integer, BigInteger, DateTime, ForeignKey, select, func
+from sqlalchemy import create_engine, Column, String, Integer, BigInteger, DateTime, ForeignKey, select, func, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, mapped_column, Mapped
 
 # ---------- Config ----------
@@ -28,10 +28,6 @@ class Market(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_update: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    
-    # Additional fields for Fed rate markets
-    rate_cuts: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    expiry_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 class Quote(Base):
     __tablename__ = "quotes"
@@ -51,14 +47,41 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    
+    # Add new columns if they don't exist (safe migration)
+    with engine.connect() as conn:
+        # Check if rate_cuts column exists
+        try:
+            result = conn.execute(text("SELECT rate_cuts FROM markets LIMIT 1"))
+            result.close()
+        except:
+            try:
+                conn.execute(text("ALTER TABLE markets ADD COLUMN rate_cuts INTEGER"))
+                conn.commit()
+            except:
+                pass  # Column might already exist or DB doesn't support ALTER
+        
+        # Check if expiry_date column exists  
+        try:
+            result = conn.execute(text("SELECT expiry_date FROM markets LIMIT 1"))
+            result.close()
+        except:
+            try:
+                conn.execute(text("ALTER TABLE markets ADD COLUMN expiry_date TIMESTAMP"))
+                conn.commit()
+            except:
+                pass  # Column might already exist or DB doesn't support ALTER
 
 # ---------- App ----------
-app = FastAPI(title="Kalshi Pipeline API", version="0.2.0")
+app = FastAPI(title="Kalshi Pipeline API", version="0.1.0")
+
+# origins = [o.strip() for o in os.getenv("FRONTEND_ORIGINS", "*").split(",") if o.strip()]
+# allow_all = "*" in origins or not origins
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["*"],         # TEMP: allow all to verify
+    allow_credentials=False,     # keep False for SSE simplicity
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -67,6 +90,7 @@ app.add_middleware(
 _subscribers: List[asyncio.Queue] = []
 
 async def broadcast(payload: Dict[str, Any]):
+    # push to all subscribers
     for q in list(_subscribers):
         try:
             await q.put(payload)
@@ -97,10 +121,6 @@ class MarketOut(BaseModel):
     yes_price: Optional[int] = 0
     no_price: Optional[int] = 0
     volume_24h: Optional[int] = 0
-    yes_bid: Optional[int] = 0
-    yes_ask: Optional[int] = 0
-    no_bid: Optional[int] = 0
-    no_ask: Optional[int] = 0
 
 class FedRateMarket(BaseModel):
     cuts: int
@@ -113,7 +133,6 @@ class FedRateMarket(BaseModel):
     volume: int
     ticker: str
     title: str
-    expiry_date: Optional[str] = None
 
 class HedgeRequest(BaseModel):
     loan_amount: float
@@ -137,6 +156,7 @@ def health():
 @app.get("/markets", response_model=List[MarketOut])
 def get_markets():
     with SessionLocal() as s:
+        # latest quote per ticker
         subq = (
             select(Quote.ticker, func.max(Quote.ts).label("max_ts"))
             .group_by(Quote.ticker)
@@ -146,7 +166,6 @@ def get_markets():
             select(
                 Market.ticker, Market.title, Market.category, Market.last_update,
                 Quote.yes_last, Quote.no_last,
-                Quote.yes_bid, Quote.yes_ask, Quote.no_bid, Quote.no_ask,
                 Quote.volume
             )
             .join(subq, subq.c.ticker == Market.ticker, isouter=True)
@@ -156,13 +175,11 @@ def get_markets():
         rows = s.execute(q).all()
         out = []
         for row in rows:
-            ticker, title, category, last_update, yes_last, no_last, yes_bid, yes_ask, no_bid, no_ask, volume = row
+            ticker, title, category, last_update, yes_last, no_last, volume = row
             out.append(
                 MarketOut(
                     ticker=ticker, title=title, category=category, last_update=last_update,
-                    yes_price=yes_last or 0, no_price=no_last or 0, volume_24h=volume or 0,
-                    yes_bid=yes_bid or 0, yes_ask=yes_ask or 0,
-                    no_bid=no_bid or 0, no_ask=no_ask or 0
+                    yes_price=yes_last or 0, no_price=no_last or 0, volume_24h=volume or 0
                 ).model_dump()
             )
         return out
@@ -192,7 +209,9 @@ def get_fed_rate_markets():
     """Get all Fed rate cut markets"""
     with SessionLocal() as s:
         # Get all markets in Fed category
-        markets = s.query(Market).filter(Market.category == "Fed").all()
+        markets = s.execute(
+            select(Market).where(Market.category == "Fed")
+        ).scalars().all()
         
         result = []
         for m in markets:
@@ -202,8 +221,8 @@ def get_fed_rate_markets():
             ).scalars().first()
             
             if latest:
-                # Extract number of cuts from title or ticker
-                cuts = m.rate_cuts if m.rate_cuts is not None else _extract_cuts_from_title(m.title)
+                # Extract number of cuts from title
+                cuts = _extract_cuts_from_title(m.title)
                 
                 result.append(FedRateMarket(
                     cuts=cuts,
@@ -215,8 +234,7 @@ def get_fed_rate_markets():
                     no_ask=latest.no_ask or min(100, (latest.no_last or 0) + 1),
                     volume=latest.volume or 0,
                     ticker=m.ticker,
-                    title=m.title,
-                    expiry_date=m.expiry_date.isoformat() if m.expiry_date else None
+                    title=m.title
                 ))
         
         # Sort by number of cuts
@@ -229,7 +247,9 @@ def calculate_hedge(request: HedgeRequest):
     
     # Get Fed rate markets
     with SessionLocal() as s:
-        markets = s.query(Market).filter(Market.category == "Fed").all()
+        markets = s.execute(
+            select(Market).where(Market.category == "Fed")
+        ).scalars().all()
         
         market_data = []
         for m in markets:
@@ -238,13 +258,23 @@ def calculate_hedge(request: HedgeRequest):
             ).scalars().first()
             
             if latest:
-                cuts = m.rate_cuts if m.rate_cuts is not None else _extract_cuts_from_title(m.title)
+                cuts = _extract_cuts_from_title(m.title)
                 market_data.append({
                     'cuts': cuts,
                     'probability': latest.yes_last / 100.0 if latest.yes_last else 0,
                     'price': latest.yes_last or 0,
                     'ticker': m.ticker
                 })
+    
+    # If no Fed markets exist, use sample data
+    if not market_data:
+        market_data = [
+            {'cuts': 0, 'probability': 0.15, 'price': 15, 'ticker': 'FED-NOCUT'},
+            {'cuts': 1, 'probability': 0.25, 'price': 25, 'ticker': 'FED-1CUT'},
+            {'cuts': 2, 'probability': 0.30, 'price': 30, 'ticker': 'FED-2CUT'},
+            {'cuts': 3, 'probability': 0.20, 'price': 20, 'ticker': 'FED-3CUT'},
+            {'cuts': 4, 'probability': 0.07, 'price': 7, 'ticker': 'FED-4CUT'},
+        ]
     
     # Sort by cuts
     market_data.sort(key=lambda x: x['cuts'])
@@ -295,10 +325,10 @@ def calculate_hedge(request: HedgeRequest):
                 total_hedge_cost += total_cost + fees
     
     # Calculate scenarios
-    no_refi_prob = sum(s['probability'] for s in strategies)
+    no_refi_prob = sum(s['probability'] for s in strategies) if strategies else 0.5
     refi_prob = 1 - no_refi_prob
     
-    expected_hedge_value = sum(s['probability'] * s['net_profit'] for s in strategies)
+    expected_hedge_value = sum(s['probability'] * s['net_profit'] for s in strategies) if strategies else 0
     expected_refi_value = refi_prob * (potential_loss - request.refinance_cost - total_hedge_cost)
     total_expected_value = expected_hedge_value + expected_refi_value
     
@@ -331,92 +361,108 @@ def calculate_hedge(request: HedgeRequest):
 def _extract_cuts_from_title(title: str) -> int:
     """Extract number of rate cuts from market title"""
     # Simple extraction - in production, use regex or NLP
-    if "no cut" in title.lower() or "0 cut" in title.lower():
+    title_lower = title.lower()
+    if "no cut" in title_lower or "0 cut" in title_lower or "zero cut" in title_lower:
         return 0
-    elif "1 cut" in title.lower() or "one cut" in title.lower():
+    elif "1 cut" in title_lower or "one cut" in title_lower or "exactly 1" in title_lower:
         return 1
-    elif "2 cut" in title.lower() or "two cut" in title.lower():
+    elif "2 cut" in title_lower or "two cut" in title_lower or "exactly 2" in title_lower:
         return 2
-    elif "3 cut" in title.lower() or "three cut" in title.lower():
+    elif "3 cut" in title_lower or "three cut" in title_lower or "exactly 3" in title_lower:
         return 3
-    elif "4 cut" in title.lower() or "four cut" in title.lower():
+    elif "4 cut" in title_lower or "four cut" in title_lower or "exactly 4" in title_lower:
         return 4
-    elif "5 cut" in title.lower() or "five cut" in title.lower():
+    elif "5 cut" in title_lower or "five cut" in title_lower or "exactly 5" in title_lower:
         return 5
+    elif "6 cut" in title_lower or "six cut" in title_lower:
+        return 6
     else:
         return 0
 
-# ---------- Background puller (with Fed markets) ----------
+# ---------- Background puller (stub that simulates data without Kalshi creds) ----------
 import random
 
 def _seed_if_empty():
     with SessionLocal() as s:
-        if s.query(Market).count() == 0:
+        # Check if any markets exist
+        market_count = s.execute(select(func.count()).select_from(Market)).scalar()
+        
+        if market_count == 0:
             # Seed Fed rate cut markets
             fed_markets = [
                 Market(
                     ticker="FED-NOCUT-2025", 
                     title="Fed makes no rate cuts by end of 2025", 
                     category="Fed",
-                    rate_cuts=0,
                     last_update=datetime.now(timezone.utc)
                 ),
                 Market(
                     ticker="FED-1CUT-2025", 
                     title="Fed makes exactly 1 rate cut by end of 2025", 
                     category="Fed",
-                    rate_cuts=1,
                     last_update=datetime.now(timezone.utc)
                 ),
                 Market(
                     ticker="FED-2CUT-2025", 
                     title="Fed makes exactly 2 rate cuts by end of 2025", 
                     category="Fed",
-                    rate_cuts=2,
                     last_update=datetime.now(timezone.utc)
                 ),
                 Market(
                     ticker="FED-3CUT-2025", 
                     title="Fed makes exactly 3 rate cuts by end of 2025", 
                     category="Fed",
-                    rate_cuts=3,
                     last_update=datetime.now(timezone.utc)
                 ),
                 Market(
                     ticker="FED-4CUT-2025", 
                     title="Fed makes 4 or more rate cuts by end of 2025", 
                     category="Fed",
-                    rate_cuts=4,
                     last_update=datetime.now(timezone.utc)
                 ),
             ]
             
-            # Add other sample markets
+            # Add other original sample markets
             other_markets = [
-                Market(ticker="POTUS-2024", title="Who wins the 2024 U.S. Presidential Election?", category="Politics", last_update=datetime.now(timezone.utc)),
+                Market(
+                    ticker="RATE-CUT-DEC", 
+                    title="Fed cuts rates in December?", 
+                    category="Fed",
+                    last_update=datetime.now(timezone.utc)
+                ),
+                Market(
+                    ticker="POTUS-2024", 
+                    title="Who wins the 2024 U.S. Presidential Election?", 
+                    category="Politics",
+                    last_update=datetime.now(timezone.utc)
+                ),
             ]
             
             s.add_all(fed_markets + other_markets)
             s.commit()
 
 def pull_once():
-    """Simulate market updates with realistic Fed probabilities"""
+    # In production: call Kalshi API here and upsert
+    # For now, simulate quotes to prove end-to-end
     now = datetime.now(timezone.utc)
     with SessionLocal() as s:
-        for m in s.query(Market).all():
-            if m.category == "Fed":
-                # Realistic Fed rate probabilities
-                if m.rate_cuts == 0:
+        # Get all markets using the new approach
+        markets = s.execute(select(Market)).scalars().all()
+        
+        for m in markets:
+            if m.category == "Fed" and "exactly" in m.title.lower():
+                # Realistic Fed rate probabilities for specific cut markets
+                if "no rate" in m.title.lower() or "0 cut" in m.title.lower():
                     y = random.randint(12, 18)  # 12-18% for no cuts
-                elif m.rate_cuts == 1:
+                elif "1 rate" in m.title.lower() or "1 cut" in m.title.lower():
                     y = random.randint(22, 28)  # 22-28% for 1 cut
-                elif m.rate_cuts == 2:
+                elif "2 rate" in m.title.lower() or "2 cut" in m.title.lower():
                     y = random.randint(28, 35)  # 28-35% for 2 cuts
-                elif m.rate_cuts == 3:
+                elif "3 rate" in m.title.lower() or "3 cut" in m.title.lower():
                     y = random.randint(18, 25)  # 18-25% for 3 cuts
                 else:
                     y = random.randint(5, 10)   # 5-10% for 4+ cuts
-                    
+                
                 # Add some volatility
                 y = max(1, min(99, y + random.randint(-2, 2)))
                 n = 100 - y
@@ -442,11 +488,17 @@ def pull_once():
                     volume=vol
                 ))
             else:
-                # Regular markets
+                # Regular markets or general Fed questions
                 y = random.randint(30, 70)
                 n = 100 - y
                 vol = random.randint(0, 5000)
-                s.add(Quote(ticker=m.ticker, ts=now, yes_last=y, no_last=n, volume=vol))
+                s.add(Quote(
+                    ticker=m.ticker, 
+                    ts=now, 
+                    yes_last=y, 
+                    no_last=n, 
+                    volume=vol
+                ))
             
             m.last_update = now
         s.commit()
@@ -454,9 +506,12 @@ def pull_once():
 async def pull_loop():
     while True:
         pull_once()
+        # broadcast a compact patch for the UI
         with SessionLocal() as s:
             out = []
-            for m in s.query(Market).all():
+            markets = s.execute(select(Market)).scalars().all()
+            for m in markets:
+                # get latest quote for ticker m
                 latest = s.execute(
                     select(Quote).where(Quote.ticker == m.ticker).order_by(Quote.ts.desc()).limit(1)
                 ).scalars().first()
@@ -465,10 +520,6 @@ async def pull_loop():
                         "ticker": m.ticker,
                         "yes_price": latest.yes_last,
                         "no_price": latest.no_last,
-                        "yes_bid": latest.yes_bid,
-                        "yes_ask": latest.yes_ask,
-                        "no_bid": latest.no_bid,
-                        "no_ask": latest.no_ask,
                         "volume_24h": latest.volume
                     })
         await broadcast({"type": "upsert", "markets": out, "ts": datetime.now(timezone.utc).isoformat()})
@@ -482,4 +533,5 @@ async def on_startup():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(pull_once, "interval", seconds=PULL_INTERVAL_SECONDS)
     scheduler.start()
+    # Also kick off an async loop that broadcasts to SSE
     asyncio.create_task(pull_loop())
