@@ -183,6 +183,85 @@
         return Math.round(targetRecovery * feeAdjustment);
       }, [yearlyOpportunityCost, fedMarkets, cutsToRefinance]);
 
+      // Calculate scenario outcomes
+      const scenarioOutcomes = useMemo(() => {
+        if (!hedgeData || !hedgeData.allocations) return null;
+
+        const outcomes = [];
+        const totalHedgeCost = hedgeData.total_hedge_cost || 0;
+
+        // Calculate outcome for each Fed market scenario
+        fedMarkets.forEach(market => {
+          const allocation = hedgeData.allocations.find(a => a.cuts === market.cuts);
+          const isRefinance = market.cuts >= cutsToRefinance;
+          
+          let hedgeResult = 0;
+          let refinanceSavings = 0;
+          let netOutcome = 0;
+          let description = '';
+
+          if (isRefinance) {
+            // Refinance scenario - lose all hedge investments
+            hedgeResult = -totalHedgeCost;
+            refinanceSavings = yearlyOpportunityCost - (refinanceCost / 5); // Amortize refi cost over 5 years
+            netOutcome = refinanceSavings + hedgeResult;
+            description = 'Refinance (lose hedge, save on mortgage)';
+          } else if (allocation) {
+            // No refinance, have a hedge position
+            hedgeResult = allocation.netProfit || 0;
+            refinanceSavings = 0;
+            netOutcome = hedgeResult;
+            description = 'Win hedge, rates stay high';
+          } else {
+            // No refinance, no hedge for this scenario
+            hedgeResult = 0;
+            refinanceSavings = 0;
+            netOutcome = 0;
+            description = 'No hedge for this scenario';
+          }
+
+          outcomes.push({
+            cuts: market.cuts,
+            probability: market.probability || market.price/100,
+            rateAfterCuts: currentRate - (market.cuts * 0.25),
+            hedgeResult,
+            refinanceSavings,
+            netOutcome,
+            description,
+            isRefinance
+          });
+        });
+
+        // Calculate expected values
+        const noRefiExpected = outcomes
+          .filter(o => !o.isRefinance)
+          .reduce((sum, o) => sum + (o.probability * o.netOutcome), 0);
+        
+        const refiExpected = outcomes
+          .filter(o => o.isRefinance)
+          .reduce((sum, o) => sum + (o.probability * o.netOutcome), 0);
+        
+        const totalExpected = noRefiExpected + refiExpected;
+
+        const noRefiProbability = outcomes
+          .filter(o => !o.isRefinance)
+          .reduce((sum, o) => sum + o.probability, 0);
+        
+        const refiProbability = outcomes
+          .filter(o => o.isRefinance)
+          .reduce((sum, o) => sum + o.probability, 0);
+
+        return {
+          outcomes,
+          noRefiExpected,
+          refiExpected,
+          totalExpected,
+          noRefiProbability,
+          refiProbability,
+          hedgeCost: totalHedgeCost
+        };
+      }, [hedgeData, fedMarkets, cutsToRefinance, currentRate, yearlyOpportunityCost, refinanceCost]);
+
       // Calculate hedge strategy
       const calculateHedgeStrategy = useCallback(async () => {
         if (!inputsComplete || fedMarkets.length === 0) return;
@@ -444,6 +523,29 @@
               </button>
             </div>
 
+            {/* Risk and Opportunity Alerts - Now shown AFTER calculation */}
+            {showStrategy && hedgeData && (
+              <div className="mt-8 space-y-4 fade-in">
+                <div className="bg-red-50 border-l-4 border-red-500 p-6 rounded-lg">
+                  <h3 className="text-lg font-semibold text-red-900">
+                    Annual Opportunity Cost: <span className="highlight">{fmt(yearlyOpportunityCost)}</span>
+                  </h3>
+                  <p className="mt-2 text-red-700">
+                    You need {cutsToRefinance} rate cuts to reach your {refinanceThreshold}% refinance threshold
+                  </p>
+                </div>
+
+                <div className="bg-green-50 border-l-4 border-green-500 p-6 rounded-lg">
+                  <h3 className="text-lg font-semibold text-green-900">
+                    Optimal Hedge: <span className="highlight">{fmt(optimalHedgeAmount)}</span>
+                  </h3>
+                  <p className="mt-2 text-green-700">
+                    Using live Kalshi markets to protect against rates staying high
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Live Market Data */}
             {loading ? (
               <div className="mt-8 bg-white rounded-xl shadow-lg p-8">
@@ -483,29 +585,6 @@
                       </div>
                     </a>
                   ))}
-                </div>
-              </div>
-            )}
-
-            {/* Risk and Opportunity Alerts */}
-            {inputsComplete && (
-              <div className="mt-8 space-y-4 fade-in">
-                <div className="bg-red-50 border-l-4 border-red-500 p-6 rounded-lg">
-                  <h3 className="text-lg font-semibold text-red-900">
-                    Annual Opportunity Cost: <span className="highlight">{fmt(yearlyOpportunityCost)}</span>
-                  </h3>
-                  <p className="mt-2 text-red-700">
-                    You need {cutsToRefinance} rate cuts to reach your {refinanceThreshold}% refinance threshold
-                  </p>
-                </div>
-
-                <div className="bg-green-50 border-l-4 border-green-500 p-6 rounded-lg">
-                  <h3 className="text-lg font-semibold text-green-900">
-                    Optimal Hedge: <span className="highlight">{fmt(optimalHedgeAmount)}</span>
-                  </h3>
-                  <p className="mt-2 text-green-700">
-                    Using live Kalshi markets to protect against rates staying high
-                  </p>
                 </div>
               </div>
             )}
@@ -578,6 +657,89 @@
                     </div>
                   </div>
                 </div>
+
+                {/* Probability-Weighted Outcomes Table */}
+                {scenarioOutcomes && (
+                  <div className="bg-white rounded-xl shadow-lg p-8">
+                    <h2 className="text-2xl font-semibold mb-6">Probability-Weighted Outcomes</h2>
+                    
+                    <div className="overflow-x-auto">
+                      <table className="w-full">
+                        <thead>
+                          <tr className="text-left text-sm font-medium text-gray-700 border-b">
+                            <th className="pb-3">Rate Cuts</th>
+                            <th className="pb-3">Probability</th>
+                            <th className="pb-3">New Rate</th>
+                            <th className="pb-3">Hedge Result</th>
+                            <th className="pb-3">Refi Savings</th>
+                            <th className="pb-3">Net Outcome</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {scenarioOutcomes.outcomes.map((outcome, idx) => (
+                            <tr key={idx} className={`border-b ${outcome.isRefinance ? 'bg-purple-50' : 'bg-blue-50'}`}>
+                              <td className="py-3">
+                                {outcome.cuts} {outcome.cuts === 1 ? 'cut' : 'cuts'}
+                              </td>
+                              <td className="py-3">{(outcome.probability * 100).toFixed(0)}%</td>
+                              <td className="py-3">{outcome.rateAfterCuts.toFixed(2)}%</td>
+                              <td className="py-3">
+                                <span className={outcome.hedgeResult >= 0 ? 'text-green-600 font-semibold' : 'text-red-600'}>
+                                  {outcome.hedgeResult >= 0 ? '+' : ''}{fmt(outcome.hedgeResult)}
+                                </span>
+                              </td>
+                              <td className="py-3">
+                                {outcome.refinanceSavings > 0 ? (
+                                  <span className="text-green-600 font-semibold">+{fmt(outcome.refinanceSavings)}</span>
+                                ) : (
+                                  <span className="text-gray-400">—</span>
+                                )}
+                              </td>
+                              <td className="py-3 font-bold">
+                                <span className={outcome.netOutcome >= 0 ? 'text-green-600' : 'text-red-600'}>
+                                  {outcome.netOutcome >= 0 ? '+' : ''}{fmt(outcome.netOutcome)}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Summary Statistics */}
+                    <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg p-6 text-white">
+                        <h3 className="text-sm font-medium opacity-90">No-Refi Expected Value</h3>
+                        <p className="text-2xl font-bold mt-2">
+                          {scenarioOutcomes.noRefiExpected >= 0 ? '+' : ''}{fmt(scenarioOutcomes.noRefiExpected)}
+                        </p>
+                        <p className="text-xs mt-1 opacity-75">
+                          {(scenarioOutcomes.noRefiProbability * 100).toFixed(0)}% probability
+                        </p>
+                      </div>
+                      
+                      <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg p-6 text-white">
+                        <h3 className="text-sm font-medium opacity-90">Refi Expected Value</h3>
+                        <p className="text-2xl font-bold mt-2">
+                          {scenarioOutcomes.refiExpected >= 0 ? '+' : ''}{fmt(scenarioOutcomes.refiExpected)}
+                        </p>
+                        <p className="text-xs mt-1 opacity-75">
+                          {(scenarioOutcomes.refiProbability * 100).toFixed(0)}% probability
+                        </p>
+                      </div>
+                      
+                      <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-lg p-6 text-white">
+                        <h3 className="text-sm font-medium opacity-90">Total Expected Value</h3>
+                        <p className="text-2xl font-bold mt-2">
+                          {scenarioOutcomes.totalExpected >= 0 ? '+' : ''}{fmt(scenarioOutcomes.totalExpected)}
+                        </p>
+                        <p className="text-xs mt-1 opacity-75">
+                          Hedge cost: {fmt(scenarioOutcomes.hedgeCost)}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* How to Execute */}
                 <div className="bg-amber-50 rounded-xl shadow-lg p-8">
