@@ -315,7 +315,7 @@
           
           if (contracts > 0) {
             const cost = contracts * pricePerContract;
-            const fees = contracts * KALSHI_FEES.totalFee;
+            const fees = round(KALSHI_FEES.totalFee * contracts * pricePerContract * (1 - pricePerContract))
             const payout = contracts * 1.0;
             const netProfit = payout - cost - fees;
             
