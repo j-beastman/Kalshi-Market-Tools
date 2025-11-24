@@ -315,7 +315,7 @@
           
           if (contracts > 0) {
             const cost = contracts * pricePerContract;
-            const fees = round(KALSHI_FEES.totalFee * contracts * pricePerContract * (1 - pricePerContract))
+            const fees = KALSHI_FEES.totalFee * contracts * pricePerContract * (1 - pricePerContract)
             const payout = contracts * 1.0;
             const netProfit = payout - cost - fees;
             
@@ -786,7 +786,7 @@
                 Live market data from Kalshi. Not financial advice.
               </p>
               <p className="mt-2 text-sm text-gray-500">
-                Markets update every 30 seconds. Fees: 7¢ per contract.
+                Markets update every 30 seconds. Fees: https://kalshi.com/docs/kalshi-fee-schedule.pdf
               </p>
             </div>
           </footer>
