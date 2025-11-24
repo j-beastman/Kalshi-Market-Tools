@@ -146,7 +146,7 @@ async def get_fed_markets():
         raise HTTPException(status_code=504, detail="Kalshi API timeout")
     except Exception as e:
         logger.error(f"Error fetching Kalshi markets: {e}")
-        raise HTTPException(status_code=502, detail=f"Failed to fetch markets: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch markets: {str(e)} {response}")
 
 @app.post("/api/calculate-hedge", response_model=HedgeResponse)
 async def calculate_hedge(request: HedgeRequest):
