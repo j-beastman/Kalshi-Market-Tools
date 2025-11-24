@@ -257,7 +257,7 @@ def calculate_hedge(request: HedgeRequest):
     else:
         # Fetch current Fed markets
         fed_markets = asyncio.run(get_fed_markets())
-        fed_markets = [m.dict() for m in fed_markets]
+        fed_markets = [m.model_dump() for m in fed_markets]
     
     # Calculate cuts needed to refinance
     rate_diff = request.current_rate - request.refinance_threshold
@@ -295,7 +295,7 @@ def calculate_hedge(request: HedgeRequest):
             
             if contracts > 0:
                 cost = contracts * price_per_contract
-                fees = contracts * KALSHI_FEE_RATE
+                fees = contracts * KALSHI_FEE_RATE * (1 - price_per_contract) * price_per_contract
                 payout = contracts * 1.0
                 net_profit = payout - cost - fees
                 
