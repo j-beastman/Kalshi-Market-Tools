@@ -92,7 +92,7 @@ async def get_fed_markets():
         async with httpx.AsyncClient() as client:
             # Get markets from KXRATECUTCOUNT series
             response = await client.get(
-                f"{KALSHI_API_BASE}",
+                f"{KALSHI_API_BASE}/markets",
                 headers=get_kalshi_headers(),
                 params={"series_ticker": "KXRATECUTCOUNT",
                         "mve_filter": "exclude"},
