@@ -148,6 +148,7 @@
 
       // Client-side calculation fallback
       const calculateClientSide = () => {
+        
         if (fedMarkets.length === 0) {
           setFedMarkets([
             { cuts: 0, probability: 0.15, price: 15, ticker: 'FALLBACK-0', yes_bid: 14, yes_ask: 16 },

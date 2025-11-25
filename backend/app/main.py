@@ -109,10 +109,17 @@ async def get_fed_markets():
             
             fed_markets = []
             for market in markets:
-                # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2024-0 means 0 cuts)
-                ticker = market.get("ticker", "")
-                cuts = int(re.search(r'(\d{1,2})$', ticker).group(1))
+                # Skip closed/settled markets
+                status = market.get("status", "")
+                if status not in ("open", "active"):
+                    continue
                 
+                # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2025-3 means 3 cuts)
+                ticker = market.get("ticker", "")
+                match = re.search(r'(\d{1,2})$', ticker)
+                if not match:
+                    continue
+                cuts = int(match.group(1))
                 
                 # Get market details
                 last_price = market.get("last_price", 0)
@@ -121,6 +128,11 @@ async def get_fed_markets():
                 no_bid = market.get("no_bid", 0)
                 no_ask = market.get("no_ask", 0)
                 volume = market.get("volume_24h", 0)
+                
+                # Skip markets with spread > 10 cents (too illiquid/speculative)
+                spread = yes_ask - yes_bid
+                if spread > 10:
+                    continue
                 
                 fed_markets.append(FedMarket(
                     ticker=ticker,
@@ -146,7 +158,7 @@ async def get_fed_markets():
         raise HTTPException(status_code=504, detail="Kalshi API timeout")
     except Exception as e:
         logger.error(f"Error fetching Kalshi markets: {e}")
-        raise HTTPException(status_code=502, detail=f"Failed to fetch markets: {str(e)} {response}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch markets: {str(e)}")
 
 @app.post("/api/calculate-hedge", response_model=HedgeResponse)
 async def calculate_hedge(request: HedgeRequest):
@@ -221,7 +233,8 @@ async def calculate_hedge(request: HedgeRequest):
         
         if contracts > 0:
             cost = contracts * price_per_contract
-            fees = contracts * KALSHI_FEE
+            p = market.price / 100  # price as decimal
+            fees = math.ceil(0.07 * contracts * p * (1 - p) * 100) / 100
             payout = contracts * 1.0
             net_profit = payout - cost - fees
             
