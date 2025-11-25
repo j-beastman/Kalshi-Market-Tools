@@ -111,7 +111,7 @@ async def get_fed_markets():
             for market in markets:
                 # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2024-0 means 0 cuts)
                 ticker = market.get("ticker", "")
-                cuts = re.search(r'(\d{1,2})$', ticker)
+                cuts = int(re.search(r'(\d{1,2})$', ticker).group(1))
                 
                 
                 # Get market details
