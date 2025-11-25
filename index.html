@@ -146,58 +146,58 @@
         }
       };
 
-    //   // Client-side calculation fallback
-    //   const calculateClientSide = () => {
+      // Client-side calculation fallback
+      const calculateClientSide = () => {
         
-    //     if (fedMarkets.length === 0) {
-    //       setFedMarkets([
-    //         { cuts: 0, probability: 0.15, price: 15, ticker: 'FALLBACK-0', yes_bid: 14, yes_ask: 16 },
-    //         { cuts: 1, probability: 0.25, price: 25, ticker: 'FALLBACK-1', yes_bid: 24, yes_ask: 26 },
-    //         { cuts: 2, probability: 0.35, price: 35, ticker: 'FALLBACK-2', yes_bid: 34, yes_ask: 36 },
-    //         { cuts: 3, probability: 0.20, price: 20, ticker: 'FALLBACK-3', yes_bid: 19, yes_ask: 21 },
-    //         { cuts: 4, probability: 0.05, price: 5, ticker: 'FALLBACK-4', yes_bid: 4, yes_ask: 6 },
-    //       ]);
-    //     }
+        if (fedMarkets.length === 0) {
+          setFedMarkets([
+            { cuts: 0, probability: 0.15, price: 15, ticker: 'FALLBACK-0', yes_bid: 14, yes_ask: 16 },
+            { cuts: 1, probability: 0.25, price: 25, ticker: 'FALLBACK-1', yes_bid: 24, yes_ask: 26 },
+            { cuts: 2, probability: 0.35, price: 35, ticker: 'FALLBACK-2', yes_bid: 34, yes_ask: 36 },
+            { cuts: 3, probability: 0.20, price: 20, ticker: 'FALLBACK-3', yes_bid: 19, yes_ask: 21 },
+            { cuts: 4, probability: 0.05, price: 5, ticker: 'FALLBACK-4', yes_bid: 4, yes_ask: 6 },
+          ]);
+        }
 
-    //     const eligible = fedMarkets.filter(m => m.cuts < cutsToRefinance);
-    //     const totalProb = eligible.reduce((sum, m) => sum + m.probability, 0);
+        const eligible = fedMarkets.filter(m => m.cuts < cutsToRefinance);
+        const totalProb = eligible.reduce((sum, m) => sum + m.probability, 0);
         
-    //     const allocations = eligible.map(market => {
-    //       const weight = strategyType === 'probability-weighted' 
-    //         ? market.probability / totalProb
-    //         : 1.0 / eligible.length;
+        const allocations = eligible.map(market => {
+          const weight = strategyType === 'probability-weighted' 
+            ? market.probability / totalProb
+            : 1.0 / eligible.length;
           
-    //       const allocation = optimalHedgeAmount * weight;
-    //       const contracts = Math.floor(allocation / (market.price / 100));
-    //       const cost = contracts * (market.price / 100);
-    //       const fees = contracts * KALSHI_FEE;
-    //       const netProfit = contracts - cost - fees;
+          const allocation = optimalHedgeAmount * weight;
+          const contracts = Math.floor(allocation / (market.price / 100));
+          const cost = contracts * (market.price / 100);
+          const fees = contracts * KALSHI_FEE;
+          const netProfit = contracts - cost - fees;
           
-    //       return {
-    //         cuts: market.cuts,
-    //         probability: market.probability,
-    //         price: market.price,
-    //         ticker: market.ticker,
-    //         allocation,
-    //         contracts,
-    //         cost,
-    //         fees,
-    //         payout: contracts,
-    //         netProfit,
-    //         kalshiUrl: `https://kalshi.com/markets/${market.ticker}`
-    //       };
-    //     });
+          return {
+            cuts: market.cuts,
+            probability: market.probability,
+            price: market.price,
+            ticker: market.ticker,
+            allocation,
+            contracts,
+            cost,
+            fees,
+            payout: contracts,
+            netProfit,
+            kalshiUrl: `https://kalshi.com/markets/${market.ticker}`
+          };
+        });
 
-    //     setHedgeData({
-    //       yearly_opportunity_cost: yearlyOpportunityCost,
-    //       optimal_hedge_amount: optimalHedgeAmount,
-    //       cuts_to_refinance: cutsToRefinance,
-    //       allocations,
-    //       total_hedge_cost: allocations.reduce((sum, a) => sum + a.cost + a.fees, 0),
-    //       expected_value: allocations.reduce((sum, a) => sum + a.probability * a.netProfit, 0)
-    //     });
-    //     setShowResults(true);
-    //   };
+        setHedgeData({
+          yearly_opportunity_cost: yearlyOpportunityCost,
+          optimal_hedge_amount: optimalHedgeAmount,
+          cuts_to_refinance: cutsToRefinance,
+          allocations,
+          total_hedge_cost: allocations.reduce((sum, a) => sum + a.cost + a.fees, 0),
+          expected_value: allocations.reduce((sum, a) => sum + a.probability * a.netProfit, 0)
+        });
+        setShowResults(true);
+      };
 
       // Calculate scenario outcomes
       const scenarios = useMemo(() => {

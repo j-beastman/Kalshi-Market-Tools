@@ -114,12 +114,16 @@ async def get_fed_markets():
                 if status not in ("open", "active"):
                     continue
                 
-                # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2025-3 means 3 cuts)
+                # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2025-T3 means 3 cuts)
                 ticker = market.get("ticker", "")
                 match = re.search(r'(\d{1,2})$', ticker)
                 if not match:
                     continue
                 cuts = int(match.group(1))
+                # Only do cuts for 2026
+                match = int(re.search(r'-(\d{2})[A-Z]{3}\d{2}', ticker).group(1))
+                if not match or match < 26:
+                    continue
                 
                 # Get market details
                 last_price = market.get("last_price", 0)
