@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio
 import math
 import logging
@@ -110,9 +111,8 @@ async def get_fed_markets():
             for market in markets:
                 # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2024-0 means 0 cuts)
                 ticker = market.get("ticker", "")
-                parts = ticker.split("-")
-                cuts = int(parts[-1]) if parts and parts[-1].isdigit() else 0
-                logger.info(f"{ticker}, Parts, {parts}, CUTS, {cuts}")
+                cuts = re.search(r'(\d{1,2})$', ticker)
+                
                 
                 # Get market details
                 last_price = market.get("last_price", 0)
