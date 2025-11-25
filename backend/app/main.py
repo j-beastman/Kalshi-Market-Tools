@@ -131,7 +131,8 @@ async def get_fed_markets():
                 
                 # Skip markets with spread > 10 cents (too illiquid/speculative)
                 spread = yes_ask - yes_bid
-                if spread > 10:
+                open_interest = market.get("open_interest", 0)
+                if spread > 10 and open_interest != 0 and volume > 1000 and last_price > 0:
                     continue
                 
                 fed_markets.append(FedMarket(
