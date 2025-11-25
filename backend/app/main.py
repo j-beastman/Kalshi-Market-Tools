@@ -112,10 +112,10 @@ async def get_fed_markets():
                 ticker = market.get("ticker", "")
                 parts = ticker.split("-")
                 cuts = int(parts[-1]) if parts and parts[-1].isdigit() else 0
+                logger.info(f"{ticker}, Parts, {parts}, CUTS, {cuts}")
                 
                 # Get market details
-                yes_price = market.get("yes_price", 0)
-                no_price = market.get("no_price", 0)
+                last_price = market.get("last_price", 0)
                 yes_bid = market.get("yes_bid", 0)
                 yes_ask = market.get("yes_ask", 0)
                 no_bid = market.get("no_bid", 0)
@@ -126,8 +126,8 @@ async def get_fed_markets():
                     ticker=ticker,
                     title=market.get("title", f"{cuts} rate cuts"),
                     cuts=cuts,
-                    probability=yes_price / 100.0 if yes_price else 0,
-                    price=yes_price,
+                    probability=last_price / 100.0 if last_price else 0,
+                    price=last_price,
                     yes_bid=yes_bid,
                     yes_ask=yes_ask,
                     no_bid=no_bid,
