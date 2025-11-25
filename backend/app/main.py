@@ -253,7 +253,7 @@ async def calculate_hedge(request: HedgeRequest):
                 'netProfit': net_profit,
                 'kalshiUrl': f"https://kalshi.com/markets/{market.ticker}"
             })
-    
+    #
     total_hedge_cost = sum(a['cost'] + a['fees'] for a in allocations)
     expected_value = sum(a['probability'] * a['netProfit'] for a in allocations)
     
