@@ -120,7 +120,7 @@ async def get_fed_markets():
                 if not match:
                     continue
                 cuts = int(match.group(1))
-                # Only do cuts for 2026
+                # Only do cuts for 2026.
                 match = int(re.search(r'-(\d{2})[A-Z]{3}\d{2}', ticker).group(1))
                 if not match or match < 26:
                     continue
