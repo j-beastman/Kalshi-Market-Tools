@@ -169,9 +169,7 @@ async def get_fed_markets():
 async def calculate_hedge(request: HedgeRequest):
     """Calculate optimal hedge strategy"""
     
-    # Constants
-    KALSHI_FEE = 0.07  # 7 cents per contract
-    
+        
     # Fetch current Fed markets
     try:
         fed_markets = await get_fed_markets()
@@ -207,6 +205,7 @@ async def calculate_hedge(request: HedgeRequest):
     
     # Get eligible markets (only hedge scenarios where we DON'T refinance)
     eligible_markets = [m for m in fed_markets if m.cuts < cuts_to_refinance]
+    logger.info(f"eligible markets: {eligible_markets}")
     
     if not eligible_markets:
         return HedgeResponse(
