@@ -133,7 +133,7 @@ async def get_fed_markets():
                 
                 # Skip markets that don't meet quality criteria
                 spread = yes_ask - yes_bid
-                if spread > 10 or volume <= 1000 or last_price <= 0 or open_interest == 0:
+                if spread > 10 or last_price <= 0 or open_interest == 0:
                     logger.info(f"Filtering {ticker}: spread={spread}, volume={volume}, last_price={last_price}, open_interest={open_interest}")
                     continue
                 
