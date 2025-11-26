@@ -142,27 +142,52 @@
         }
       };
 
-      // Calculate scenario outcomes - ONLY from allocations
+      // Calculate scenario outcomes - include all qualifying markets
       const scenarios = useMemo(() => {
-        if (!hedgeData || !hedgeData.allocations || hedgeData.allocations.length === 0) return null;
+        if (!hedgeData || !fedMarkets || fedMarkets.length === 0) return null;
 
-        const outcomes = hedgeData.allocations.map(alloc => {
+        const outcomes = fedMarkets.map(market => {
+          const isRefi = market.cuts >= hedgeData.cuts_to_refinance;
+          const allocation = hedgeData.allocations.find(a => a.cuts === market.cuts);
+          
+          // If we refinance: lose hedge cost but gain yearly savings (minus amortized refi cost)
+          // If we don't refinance: win the hedge payout for that scenario
+          const hedgeResult = isRefi 
+            ? -hedgeData.total_hedge_cost 
+            : (allocation?.netProfit || 0);
+          
+          const refiSavings = isRefi 
+            ? yearlyOpportunityCost - (refinanceCost / 5)  // Amortize refi cost over 5 years
+            : 0;
+          
+          const netOutcome = hedgeResult + refiSavings;
+
           return {
-            cuts: alloc.cuts,
-            probability: alloc.probability,
-            rateAfterCuts: currentRate - (alloc.cuts * 0.25),
-            hedgeResult: alloc.netProfit,
-            netOutcome: alloc.netProfit
+            cuts: market.cuts,
+            probability: market.probability,
+            rateAfterCuts: currentRate - (market.cuts * 0.25),
+            hedgeResult,
+            refiSavings,
+            netOutcome,
+            isRefi
           };
         });
 
-        const totalExpected = outcomes.reduce((sum, o) => sum + o.probability * o.netOutcome, 0);
+        const noRefiExpected = outcomes
+          .filter(o => !o.isRefi)
+          .reduce((sum, o) => sum + o.probability * o.netOutcome, 0);
+        
+        const refiExpected = outcomes
+          .filter(o => o.isRefi)
+          .reduce((sum, o) => sum + o.probability * o.netOutcome, 0);
 
         return {
           outcomes,
-          totalExpected
+          noRefiExpected,
+          refiExpected,
+          totalExpected: noRefiExpected + refiExpected
         };
-      }, [hedgeData, currentRate]);
+      }, [hedgeData, fedMarkets, currentRate, yearlyOpportunityCost, refinanceCost]);
 
       const fmt = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
 
@@ -367,7 +392,7 @@
                   </div>
                 </div>
 
-                {/* Probability-Weighted Outcomes - uses allocations only */}
+                {/* Probability-Weighted Outcomes - all qualifying markets */}
                 {scenarios && (
                   <div className="bg-white rounded-xl shadow-lg p-8">
                     <h2 className="text-2xl font-semibold mb-6">Probability-Weighted Outcomes</h2>
@@ -378,22 +403,37 @@
                           <tr className="text-left text-sm font-medium text-gray-700 border-b">
                             <th className="pb-3">Rate Cuts</th>
                             <th className="pb-3">Probability</th>
-                            <th className="pb-3">Rate After Cuts</th>
-                            <th className="pb-3">Hedge Payout</th>
-                            <th className="pb-3">Expected Contribution</th>
+                            <th className="pb-3">New Rate</th>
+                            <th className="pb-3">Hedge Result</th>
+                            <th className="pb-3">Refi Savings</th>
+                            <th className="pb-3">Net Outcome</th>
                           </tr>
                         </thead>
                         <tbody>
                           {scenarios.outcomes.map((outcome, idx) => (
-                            <tr key={idx} className="border-b bg-blue-50">
-                              <td className="py-3">{outcome.cuts} {outcome.cuts === 1 ? 'cut' : 'cuts'}</td>
+                            <tr key={idx} className={`border-b ${outcome.isRefi ? 'bg-purple-50' : 'bg-blue-50'}`}>
+                              <td className="py-3">
+                                {outcome.cuts} {outcome.cuts === 1 ? 'cut' : 'cuts'}
+                                {outcome.isRefi && <span className="ml-2 text-xs bg-purple-200 text-purple-700 px-2 py-0.5 rounded">REFI</span>}
+                              </td>
                               <td className="py-3">{(outcome.probability * 100).toFixed(0)}%</td>
                               <td className="py-3">{outcome.rateAfterCuts.toFixed(2)}%</td>
                               <td className="py-3">
-                                <span className="text-green-600 font-semibold">+{fmt(outcome.hedgeResult)}</span>
+                                <span className={outcome.hedgeResult >= 0 ? 'text-green-600 font-semibold' : 'text-red-600'}>
+                                  {outcome.hedgeResult >= 0 ? '+' : ''}{fmt(outcome.hedgeResult)}
+                                </span>
+                              </td>
+                              <td className="py-3">
+                                {outcome.refiSavings > 0 ? (
+                                  <span className="text-green-600 font-semibold">+{fmt(outcome.refiSavings)}</span>
+                                ) : (
+                                  <span className="text-gray-400">—</span>
+                                )}
                               </td>
                               <td className="py-3 font-bold">
-                                <span className="text-green-600">+{fmt(outcome.probability * outcome.netOutcome)}</span>
+                                <span className={outcome.netOutcome >= 0 ? 'text-green-600' : 'text-red-600'}>
+                                  {outcome.netOutcome >= 0 ? '+' : ''}{fmt(outcome.netOutcome)}
+                                </span>
                               </td>
                             </tr>
                           ))}
@@ -401,11 +441,23 @@
                       </table>
                     </div>
 
-                    <div className="mt-8">
+                    <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg p-6 text-white">
+                        <h3 className="text-sm font-medium opacity-90">No-Refi Expected Value</h3>
+                        <p className="text-2xl font-bold mt-2">{scenarios.noRefiExpected >= 0 ? '+' : ''}{fmt(scenarios.noRefiExpected)}</p>
+                        <p className="text-sm opacity-75 mt-1">Hedge pays out, rates stay high</p>
+                      </div>
+                      
+                      <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg p-6 text-white">
+                        <h3 className="text-sm font-medium opacity-90">Refi Expected Value</h3>
+                        <p className="text-2xl font-bold mt-2">{scenarios.refiExpected >= 0 ? '+' : ''}{fmt(scenarios.refiExpected)}</p>
+                        <p className="text-sm opacity-75 mt-1">Refinance savings minus hedge cost</p>
+                      </div>
+                      
                       <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-lg p-6 text-white">
                         <h3 className="text-sm font-medium opacity-90">Total Expected Value</h3>
-                        <p className="text-2xl font-bold mt-2">+{fmt(scenarios.totalExpected)}</p>
-                        <p className="text-sm opacity-75 mt-1">Sum of probability-weighted outcomes</p>
+                        <p className="text-2xl font-bold mt-2">{scenarios.totalExpected >= 0 ? '+' : ''}{fmt(scenarios.totalExpected)}</p>
+                        <p className="text-sm opacity-75 mt-1">Sum of all probability-weighted outcomes</p>
                       </div>
                     </div>
                   </div>

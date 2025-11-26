@@ -114,16 +114,12 @@ async def get_fed_markets():
                 if status not in ("open", "active"):
                     continue
                 
-                # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2025-T3 means 3 cuts)
+                # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2025-3 means 3 cuts)
                 ticker = market.get("ticker", "")
                 match = re.search(r'(\d{1,2})$', ticker)
                 if not match:
                     continue
                 cuts = int(match.group(1))
-                # Only do cuts for 2026.
-                match = int(re.search(r'-(\d{2})[A-Z]{3}\d{2}', ticker).group(1))
-                if not match or match < 26:
-                    continue
                 
                 # Get market details
                 last_price = market.get("last_price", 0)
@@ -132,11 +128,11 @@ async def get_fed_markets():
                 no_bid = market.get("no_bid", 0)
                 no_ask = market.get("no_ask", 0)
                 volume = market.get("volume_24h", 0)
-                
-                # Skip markets with spread > 10 cents (too illiquid/speculative)
-                spread = yes_ask - yes_bid
                 open_interest = market.get("open_interest", 0)
-                if spread < 10 and open_interest != 0 and volume > 1000 and last_price > 0:
+                
+                # Skip markets that don't meet quality criteria
+                spread = yes_ask - yes_bid
+                if spread > 10 or volume <= 1000 or last_price <= 0 or open_interest == 0:
                     continue
                 
                 fed_markets.append(FedMarket(
@@ -169,7 +165,6 @@ async def get_fed_markets():
 async def calculate_hedge(request: HedgeRequest):
     """Calculate optimal hedge strategy"""
     
-        
     # Fetch current Fed markets
     try:
         fed_markets = await get_fed_markets()
@@ -205,7 +200,6 @@ async def calculate_hedge(request: HedgeRequest):
     
     # Get eligible markets (only hedge scenarios where we DON'T refinance)
     eligible_markets = [m for m in fed_markets if m.cuts < cuts_to_refinance]
-    logger.info(f"eligible markets: {eligible_markets}")
     
     if not eligible_markets:
         return HedgeResponse(
@@ -237,6 +231,7 @@ async def calculate_hedge(request: HedgeRequest):
         
         if contracts > 0:
             cost = contracts * price_per_contract
+            # Kalshi fee formula: ceil(0.07 × C × P × (1-P))
             p = market.price / 100  # price as decimal
             fees = math.ceil(0.07 * contracts * p * (1 - p) * 100) / 100
             payout = contracts * 1.0
@@ -256,7 +251,7 @@ async def calculate_hedge(request: HedgeRequest):
                 'netProfit': net_profit,
                 'kalshiUrl': f"https://kalshi.com/markets/{market.ticker}"
             })
-    #
+    
     total_hedge_cost = sum(a['cost'] + a['fees'] for a in allocations)
     expected_value = sum(a['probability'] * a['netProfit'] for a in allocations)
     
