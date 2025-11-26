@@ -112,6 +112,7 @@ async def get_fed_markets():
                 # Skip closed/settled markets
                 status = market.get("status", "")
                 if status not in ("open", "active"):
+                    logger.info(f"Skipping {market.get('ticker')} - status: {status}")
                     continue
                 
                 # Extract cuts from ticker (e.g., KXRATECUTCOUNT-2025-3 means 3 cuts)
@@ -133,6 +134,7 @@ async def get_fed_markets():
                 # Skip markets that don't meet quality criteria
                 spread = yes_ask - yes_bid
                 if spread > 10 or volume <= 1000 or last_price <= 0 or open_interest == 0:
+                    logger.info(f"Filtering {ticker}: spread={spread}, volume={volume}, last_price={last_price}, open_interest={open_interest}")
                     continue
                 
                 fed_markets.append(FedMarket(
